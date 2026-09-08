@@ -1,0 +1,10 @@
+{
+  "name": "customer-profile-database",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Password-protected Customer Profile Database web app (THANVASU)",
+  "dependencies": {
+    "mssql": "^12.7.0",
+    "odbc": "^2.5.0"
+  }
+}
