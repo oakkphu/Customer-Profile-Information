@@ -10,6 +10,7 @@ const state = {
   customers: [],
   q: '',
   typeFilter: '',
+  dbError: null,        // last DB connection error message (list)
   current: null,        // detail customer
   draft: null,          // form model
   step: 1,
@@ -81,19 +82,23 @@ async function api(path, opts) {
 }
 
 /* ================= LOGIN ================= */
+function isDbFailMsg(msg) {
+  return String(msg || '').includes('เชื่อมต่อฐานข้อมูลไม่ได้');
+}
+
 function renderLogin(errMsg) {
   document.title = 'เข้าสู่ระบบ — Customer Profile Database';
   app.innerHTML = `
   <div class="login-wrap">
     <form class="login-card" id="loginForm">
-      <div class="login-logo">🗄️</div>
+      <div class="login-mark">TV</div>
       <h1>Customer Profile Database</h1>
-      <div class="sub">ระบบข้อมูลโปรไฟล์ลูกค้า • THANVASU (Internal Use Only)</div>
+      <div class="sub">THANVASU • Internal Use Only</div>
       ${errMsg ? `<div class="login-err" style="display:block">${esc(errMsg)}</div>` : '<div class="login-err" id="loginErr"></div>'}
       <label class="req">รหัสผ่าน</label>
       <input type="password" id="pw" placeholder="••••••••" autocomplete="current-password" autofocus>
-      <button class="btn" style="width:100%;margin-top:16px" type="submit">🔓 เข้าสู่ระบบ</button>
-      <div class="login-hint">🔐 เข้าถึงเฉพาะผู้ที่มีรหัสผ่านเท่านั้น</div>
+      <button class="btn" style="width:100%;margin-top:16px" type="submit">เข้าสู่ระบบ</button>
+      <div class="login-hint">สำหรับเจ้าหน้าที่ที่มีรหัสผ่านเท่านั้น</div>
     </form>
   </div>`;
   $('#loginForm').addEventListener('submit', async e => {
@@ -104,14 +109,24 @@ function renderLogin(errMsg) {
       await api('/api/login', { method: 'POST', json: { password: $('#pw').value } });
       state.authed = true;
       await loadMeta();
-      await loadCustomers();
       location.hash = '';
-      renderDashboard();
+      try {
+        await loadCustomers();
+        renderDashboard();
+      } catch (loadErr) {
+        if (loadErr.message === 'unauthorized') throw loadErr;
+        state.customers = [];
+        state.dbError = isDbFailMsg(loadErr.message) ? loadErr.message : loadErr.message;
+        renderDashboard();
+        toast(state.dbError, true);
+      }
     } catch (err) {
-      const box = $('#loginErr');
-      box.textContent = err.message === 'unauthorized' ? 'รหัสผ่านไม่ถูกต้อง กรุณาลองอีกครั้ง' : err.message;
-      box.style.display = 'block';
-      btn.disabled = false; btn.textContent = '🔓 เข้าสู่ระบบ';
+      const box = $('#loginErr') || $('.login-err');
+      if (box) {
+        box.textContent = err.message === 'unauthorized' ? 'รหัสผ่านไม่ถูกต้อง กรุณาลองอีกครั้ง' : err.message;
+        box.style.display = 'block';
+      }
+      btn.disabled = false; btn.textContent = 'เข้าสู่ระบบ';
     }
   });
 }
@@ -121,11 +136,12 @@ function shell(content, active) {
   document.title = 'Customer Profile Database — THANVASU';
   app.innerHTML = `
   <div class="topbar">
-    <div class="brand">🗄️ Customer Profile Database <small>THANVASU</small></div>
-    <div class="spacer"></div>
-    <button class="btn ghost sm" id="navHome">📋 รายการลูกค้า</button>
-    <button class="btn sm" id="navNew">＋ เพิ่มลูกค้า</button>
-    <button class="btn ghost sm" id="navLogout">ออกจากระบบ</button>
+    <div class="brand"><span class="mark">TV</span> Customer Profile Database <small>THANVASU</small></div>
+    <div class="nav">
+      <button class="btn ghost sm" id="navHome">รายการลูกค้า</button>
+      <button class="btn sm" id="navNew">เพิ่มลูกค้า</button>
+      <button class="btn ghost sm" id="navLogout">ออกจากระบบ</button>
+    </div>
   </div>
   <div class="container">${content}</div>`;
   $('#navHome').onclick = () => { location.hash = ''; };
@@ -133,8 +149,15 @@ function shell(content, active) {
   $('#navLogout').onclick = async () => {
     try { await api('/api/logout', { method: 'POST' }); } catch (e) {}
     state.authed = false;
+    state.dbError = null;
     renderLogin();
   };
+}
+
+function clearFilters() {
+  state.q = '';
+  state.typeFilter = '';
+  renderDashboard();
 }
 
 /* ================= DASHBOARD ================= */
@@ -153,15 +176,12 @@ function filtered() {
       .join(' ').toLowerCase().includes(q);
   });
 }
-function renderDashboard() {
-  const list = filtered();
-  const types = state.meta ? state.meta.businessTypes : BUSINESS_FALLBACK;
-  const cards = list.map(c => {
-    const sysCount = (c.systems || []).length;
-    return `
+function cardHtml(c) {
+  const sysCount = (c.systems || []).length;
+  return `
     <div class="cust-card" data-id="${esc(c.id)}">
       <div class="head">
-        ${c.logoUrl ? `<img class="cust-thumb" src="${esc(c.logoUrl)}" alt="">` : `<div class="cust-thumb ph">🏪</div>`}
+        ${c.logoUrl ? `<img class="cust-thumb" src="${esc(c.logoUrl)}" alt="">` : `<div class="cust-thumb ph">ร้าน</div>`}
         <div style="min-width:0">
           <div class="name">${esc(c.shopNameTh || c.shopNameEn || '(ไม่มีชื่อ)')}</div>
           <div class="company">${esc(c.shopNameEn && c.shopNameTh ? c.shopNameEn : (c.companyNameTh || c.companyNameEn || ''))}</div>
@@ -174,11 +194,24 @@ function renderDashboard() {
       </div>
       <div>${(c.systems || []).slice(0, 4).map(s => `<span class="sys-chip">${esc(s)}</span>`).join('')}${sysCount > 4 ? `<span class="sys-chip">+${sysCount - 4}</span>` : ''}</div>
       <div class="cust-foot">
-        <span>👤 ${esc(c.ownerNickname || c.ownerName || '—')}</span>
-        <span>📅 ${esc(fmtDate(c.startDate) || '—')}</span>
+        <span>${esc(c.ownerNickname || c.ownerName || '—')}</span>
+        <span>${esc(fmtDate(c.startDate) || '—')}</span>
       </div>
     </div>`;
-  }).join('');
+}
+
+function emptySearchHtml() {
+  return `<div class="empty"><div class="big">ไม่พบรายการ</div><div>ไม่พบรายการที่ตรงกับการค้นหาหรือตัวกรอง</div>
+    <div class="actions"><button type="button" class="btn ghost" id="btnClearFilters">ล้างตัวกรอง</button></div></div>`;
+}
+
+function renderDashboard() {
+  const list = filtered();
+  const types = state.meta ? state.meta.businessTypes : BUSINESS_FALLBACK;
+  const cards = list.map(cardHtml).join('');
+  const banner = state.dbError
+    ? `<div class="db-banner" role="alert">${esc(state.dbError)}</div>`
+    : '';
 
   shell(`
     <div class="page-head">
@@ -186,23 +219,30 @@ function renderDashboard() {
       <span class="count">${list.length} รายการ${state.customers.length !== list.length ? ' (จากทั้งหมด ' + state.customers.length + ')' : ''}</span>
       <div class="spacer"></div>
     </div>
+    ${banner}
     <div class="toolbar">
-      <input type="search" id="q" placeholder="🔍 ค้นหาชื่อร้าน บริษัท เจ้าของ เบอร์ อีเมล รหัส…" value="${esc(state.q)}">
+      <input type="search" id="q" placeholder="ค้นหาชื่อร้าน บริษัท เจ้าของ เบอร์ อีเมล รหัส…" value="${esc(state.q)}">
       <select id="typeFilter">
         <option value="">ประเภทธุรกิจทั้งหมด</option>
         ${types.map(t => `<option value="${esc(t.en)}" ${state.typeFilter === t.en ? 'selected' : ''}>${esc(t.th)}</option>`).join('')}
       </select>
     </div>
-    ${state.customers.length === 0 ? `
-      <div class="empty"><div class="big">🗂️</div><div>ยังไม่มีข้อมูลลูกค้า</div>
-      <button class="btn" style="margin-top:14px" onclick="location.hash='#new'">＋ เพิ่มลูกค้ารายแรก</button></div>`
-      : list.length === 0 ? `<div class="empty"><div class="big">🔍</div><div>ไม่พบรายการที่ตรงกับการค้นหา</div></div>`
+    ${state.customers.length === 0 && !state.dbError ? `
+      <div class="empty"><div class="big">ยังไม่มีข้อมูลลูกค้า</div><div>เริ่มต้นด้วยการเพิ่มโปรไฟล์ลูกค้ารายแรก</div>
+      <div class="actions"><button class="btn" id="btnEmptyNew">เพิ่มลูกค้ารายแรก</button></div></div>`
+      : state.customers.length === 0 && state.dbError ? `
+      <div class="empty"><div class="big">โหลดข้อมูลไม่ได้</div><div>แก้ไขการเชื่อมต่อฐานข้อมูลแล้วลองรีเฟรชหน้า</div></div>`
+      : list.length === 0 ? emptySearchHtml()
       : `<div class="grid">${cards}</div>`}
   `, 'home');
 
   $('#q').addEventListener('input', e => { state.q = e.target.value; refreshListOnly(); });
   $('#typeFilter').addEventListener('change', e => { state.typeFilter = e.target.value; refreshListOnly(); });
   $$('.cust-card').forEach(el => el.onclick = () => { location.hash = '#c/' + el.dataset.id; });
+  const clearBtn = $('#btnClearFilters');
+  if (clearBtn) clearBtn.onclick = clearFilters;
+  const emptyNew = $('#btnEmptyNew');
+  if (emptyNew) emptyNew.onclick = () => { location.hash = '#new'; };
 }
 function refreshListOnly() {
   // re-render only the list area to keep focus in search box
@@ -212,32 +252,14 @@ function refreshListOnly() {
   if (head) head.innerHTML = `${list.length} รายการ${state.customers.length !== list.length ? ' (จากทั้งหมด ' + state.customers.length + ')' : ''}`;
   const grid = gridHost.querySelector('.grid');
   const emptyBox = gridHost.querySelector('.empty');
-  const cards = list.map(c => {
-    const sysCount = (c.systems || []).length;
-    return `
-    <div class="cust-card" data-id="${esc(c.id)}">
-      <div class="head">
-        ${c.logoUrl ? `<img class="cust-thumb" src="${esc(c.logoUrl)}" alt="">` : `<div class="cust-thumb ph">🏪</div>`}
-        <div style="min-width:0">
-          <div class="name">${esc(c.shopNameTh || c.shopNameEn || '(ไม่มีชื่อ)')}</div>
-          <div class="company">${esc(c.shopNameEn && c.shopNameTh ? c.shopNameEn : (c.companyNameTh || c.companyNameEn || ''))}</div>
-        </div>
-      </div>
-      <div class="cust-meta">
-        <span class="badge">${esc(c.code || '')}</span>
-        <span class="badge gray">${esc(bizLabel(c.businessType) || 'ไม่ระบุ')}</span>
-        ${c.branchCount ? `<span class="badge gray">${esc(c.branchCount)} สาขา</span>` : ''}
-      </div>
-      <div>${(c.systems || []).slice(0, 4).map(s => `<span class="sys-chip">${esc(s)}</span>`).join('')}${sysCount > 4 ? `<span class="sys-chip">+${sysCount - 4}</span>` : ''}</div>
-      <div class="cust-foot">
-        <span>👤 ${esc(c.ownerNickname || c.ownerName || '—')}</span>
-        <span>📅 ${esc(fmtDate(c.startDate) || '—')}</span>
-      </div>
-    </div>`;
-  }).join('');
+  const cards = list.map(cardHtml).join('');
   if (state.customers.length === 0) { /* keep initial empty state */ return; }
   if (list.length === 0) {
-    if (grid) grid.outerHTML = '<div class="empty"><div class="big">🔍</div><div>ไม่พบรายการที่ตรงกับการค้นหา</div></div>';
+    const html = emptySearchHtml();
+    if (grid) grid.outerHTML = html;
+    else if (emptyBox) emptyBox.outerHTML = html;
+    const clearBtn = $('#btnClearFilters');
+    if (clearBtn) clearBtn.onclick = clearFilters;
   } else {
     if (emptyBox) emptyBox.outerHTML = `<div class="grid">${cards}</div>`;
     else if (grid) grid.innerHTML = cards;
@@ -259,7 +281,7 @@ function renderDetail() {
   shell(`
     <a class="back-link" href="#">← กลับไปหน้ารายการ</a>
     <div class="detail-hero">
-      ${c.logoUrl ? `<img class="logo" src="${esc(c.logoUrl)}" alt="logo">` : `<div class="logo-ph">🏪</div>`}
+      ${c.logoUrl ? `<img class="logo" src="${esc(c.logoUrl)}" alt="logo">` : `<div class="logo-ph">ร้าน</div>`}
       <div>
         <h2>${esc(c.shopNameTh || c.shopNameEn || '(ไม่มีชื่อ)')}</h2>
         <div class="sub">${esc([c.shopNameEn, c.companyNameTh, c.companyNameEn].filter(Boolean).join(' • ') || '—')}</div>
@@ -270,8 +292,8 @@ function renderDetail() {
         </div>
       </div>
       <div class="actions">
-        <button class="btn" id="btnEdit">✏️ แก้ไข</button>
-        <button class="btn danger" id="btnDelete">🗑️ ลบ</button>
+        <button class="btn" id="btnEdit">แก้ไข</button>
+        <button class="btn danger" id="btnDelete">ลบ</button>
       </div>
     </div>
 
@@ -391,7 +413,7 @@ function renderForm() {
 
   shell(`
     <a class="back-link" href="#">← ยกเลิก กลับไปหน้ารายการ</a>
-    <div class="page-head"><h2>${editing ? '✏️ แก้ไขข้อมูล: ' + esc(d.shopNameTh || d.shopNameEn || '') : '＋ เพิ่มลูกค้าใหม่'}</h2></div>
+    <div class="page-head"><h2>${editing ? 'แก้ไขข้อมูล: ' + esc(d.shopNameTh || d.shopNameEn || '') : 'เพิ่มลูกค้าใหม่'}</h2></div>
     <div class="wizard-head">
       ${STEP_NAMES.map((n, i) => {
         const s = i + 1;
@@ -465,13 +487,13 @@ function renderForm() {
       <div class="fgrid">
         <div class="full">
           <label>Logo ร้าน (Upload img 1–2 รูป)</label>
-          <div class="upload-box" id="upLogo"><div class="big">🖼️</div>ลากรูปมาวาง หรือคลิกเพื่อเลือกไฟล์<div class="hint">(PNG / JPG / WEBP / GIF • ไม่เกิน 8MB/รูป • สูงสุด 2 รูป)</div></div>
+          <div class="upload-box" id="upLogo"><div class="big">อัปโหลด Logo</div>ลากรูปมาวาง หรือคลิกเพื่อเลือกไฟล์<div class="hint">(PNG / JPG / WEBP / GIF • ไม่เกิน 8MB/รูป • สูงสุด 2 รูป)</div></div>
           <input type="file" id="fileLogo" accept="image/*" multiple hidden>
           <div class="up-thumbs" id="thumbsLogo">${logoThumbs}</div>
         </div>
         <div class="full">
           <label>รูปหน้าร้าน / บรรยากาศ (Upload img 3–5 รูป)</label>
-          <div class="upload-box" id="upStore"><div class="big">📷</div>ลากรูปมาวาง หรือคลิกเพื่อเลือกไฟล์<div class="hint">(PNG / JPG / WEBP / GIF • ไม่เกิน 8MB/รูป • สูงสุด 5 รูป)</div></div>
+          <div class="upload-box" id="upStore"><div class="big">อัปโหลดรูปหน้าร้าน</div>ลากรูปมาวาง หรือคลิกเพื่อเลือกไฟล์<div class="hint">(PNG / JPG / WEBP / GIF • ไม่เกิน 8MB/รูป • สูงสุด 5 รูป)</div></div>
           <input type="file" id="fileStore" accept="image/*" multiple hidden>
           <div class="up-thumbs" id="thumbsStore">${storeThumbs}</div>
         </div>
@@ -479,7 +501,7 @@ function renderForm() {
 
       <div class="wizard-nav">
         <button type="button" class="btn ghost" id="btnPrev" ${step === 1 ? 'style="visibility:hidden"' : ''}>← ย้อนกลับ</button>
-        <button type="button" class="btn" id="btnNext">${step === 4 ? '💾 ' + (editing ? 'บันทึกการแก้ไข' : 'บันทึกลูกค้าใหม่') : 'ถัดไป →'}</button>
+        <button type="button" class="btn" id="btnNext">${step === 4 ? (editing ? 'บันทึกการแก้ไข' : 'บันทึกลูกค้าใหม่') : 'ถัดไป →'}</button>
       </div>
     </form>
   `, editing ? 'detail' : 'new');
@@ -635,6 +657,7 @@ async function loadMeta() {
 async function loadCustomers() {
   const data = await api('/api/customers');
   state.customers = data.customers;
+  state.dbError = null;
 }
 
 async function route() {
@@ -645,7 +668,16 @@ async function route() {
     await loadMeta();
   }
   if (h === '' || h === '#') {
-    try { await loadCustomers(); renderDashboard(); } catch (e) { if (e.message !== 'unauthorized') toast(e.message, true); }
+    try {
+      await loadCustomers();
+      renderDashboard();
+    } catch (e) {
+      if (e.message === 'unauthorized') return;
+      state.dbError = isDbFailMsg(e.message) ? e.message : e.message;
+      if (isDbFailMsg(e.message)) state.customers = [];
+      renderDashboard();
+      toast(e.message, true);
+    }
     return;
   }
   if (h === '#new') {

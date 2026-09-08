@@ -68,6 +68,15 @@ function send(res, code, body, headers) {
 }
 function json(res, code, obj) { send(res, code, JSON.stringify(obj), { 'Content-Type': 'application/json; charset=utf-8' }); }
 
+function isDbError(e) {
+  const msg = String((e && e.message) || e || '');
+  return /odbc|connect|login failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|timeout|SQL_|IM002|08001|HYT00/i.test(msg);
+}
+function dbFail(res, e) {
+  console.error(e);
+  json(res, 503, { error: 'เชื่อมต่อฐานข้อมูลไม่ได้ — ตรวจ SQL Server / ODBC / env' });
+}
+
 function parseCookies(req) {
   const out = {};
   const raw = req.headers.cookie || '';
@@ -370,6 +379,7 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     if (e && e.message === 'BODY_TOO_LARGE') { json(res, 413, { error: 'ไฟล์ใหญ่เกิน 15MB' }); return; }
     if (e instanceof SyntaxError) { json(res, 400, { error: 'invalid json' }); return; }
+    if (isDbError(e)) { dbFail(res, e); return; }
     console.error(e);
     json(res, 500, { error: 'server error' });
   }
