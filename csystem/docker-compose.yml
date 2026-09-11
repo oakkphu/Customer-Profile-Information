@@ -1,0 +1,37 @@
+# Local / Coolify-compatible stack (single public port)
+services:
+  csystem:
+    build: .
+    image: csystem:latest
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      DOCKER: "1"
+      PORT: "3000"
+      FRONTEND_PORT: "3000"
+      APP_PORT: "3220"
+      API_ORIGIN: http://127.0.0.1:3220
+      ODBC_DRIVER: ODBC Driver 18 for SQL Server
+      COOKIE_SECURE: "${COOKIE_SECURE:-0}"
+      DB_HOST: "${DB_HOST}"
+      DB_PORT: "${DB_PORT:-28914}"
+      DB_NAME: "${DB_NAME:-BD_CSystem}"
+      DB_USER: "${DB_USER}"
+      DB_PASS: "${DB_PASS}"
+      DB_ENCRYPT: "${DB_ENCRYPT:-yes}"
+      APP_SESSION_SECRET: "${APP_SESSION_SECRET}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD}"
+      ADMIN_EMAIL: "${ADMIN_EMAIL:-}"
+    volumes:
+      - csystem_uploads:/app/backend/uploads
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  csystem_uploads:

@@ -220,7 +220,12 @@ function normalizeBody(b) {
 }
 
 function customerPublic(c) {
-  const img = (list, i) => (list && list[i] ? '/files/' + list[i].file : null);
+  const img = (list, i) => {
+    if (!list || !list[i]) return null;
+    if (list[i].url) return list[i].url;
+    if (list[i].file) return '/files/' + list[i].file;
+    return null;
+  };
   return {
     id: c.id, code: c.code, createdAt: c.createdAt, updatedAt: c.updatedAt,
     shopNameTh: c.shopNameTh, shopNameEn: c.shopNameEn,
@@ -233,8 +238,12 @@ function customerPublic(c) {
     systems: c.systems || [], otherSystemApi: c.otherSystemApi || '', systemFlow: c.systemFlow || '',
     hardware: c.hardware || {}, otherHardware: c.otherHardware || '',
     logo: c.logo || [], storefront: c.storefront || [],
-    logoUrl: img(c.logo, 0),
-    storefrontUrls: (c.storefront || []).map(f => '/files/' + f.file),
+    logoUrl: c.logoUrl || img(c.logo, 0),
+    storefrontUrls: (c.storefront || []).map((f, i) => img(c.storefront, i)).filter(Boolean),
+    source: c.source || 'local',
+    readOnly: !!c.readOnly,
+    hasOverlay: !!c.hasOverlay,
+    branchDetails: c.branchDetails || [],
   };
 }
 
@@ -332,21 +341,37 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'PUT') {
         const raw = JSON.parse((await readBody(req)).toString('utf8') || '{}');
         const upd = normalizeBody(raw);
-        if (!upd.shopNameTh && !upd.shopNameEn) { json(res, 400, { error: 'กรุณากรอกชื่อร้านอย่างน้อยหนึ่งภาษา' }); return; }
-        // merge: keep existing images unless client explicitly sends file lists
+        if (!upd.shopNameTh && !upd.shopNameEn && !cur.shopNameTh) {
+          json(res, 400, { error: 'กรุณากรอกชื่อร้านอย่างน้อยหนึ่งภาษา' }); return;
+        }
+        if (!upd.shopNameTh && cur.shopNameTh) upd.shopNameTh = cur.shopNameTh;
         if (Array.isArray(raw.logo)) cur.logo = upd.logo;
         if (Array.isArray(raw.storefront)) cur.storefront = upd.storefront;
-        const keep = ['id', 'code', 'createdAt'];
+        const keep = ['id', 'code', 'createdAt', 'source', 'readOnly', 'hasOverlay', 'logoUrl'];
         for (const k of Object.keys(upd)) if (!keep.includes(k)) cur[k] = upd[k];
-        await store.updateCustomer(id, cur);
-        json(res, 200, { customer: customerPublic(cur) });
+        try {
+          const saved = await store.updateCustomer(id, cur);
+          json(res, 200, { customer: customerPublic(saved || cur) });
+        } catch (e) {
+          if (e && e.code === 'READ_ONLY') { json(res, 403, { error: e.message }); return; }
+          throw e;
+        }
         return;
       }
       if (req.method === 'DELETE') {
-        for (const f of [].concat(cur.logo || [], cur.storefront || [])) {
-          try { fs.unlinkSync(path.join(UPLOAD_DIR, f.file)); } catch (e) {}
+        if (store.isThanvasuId(id)) {
+          json(res, 403, { error: 'ไม่สามารถลบร้านจากระบบ THANVASU ได้' });
+          return;
         }
-        await store.deleteCustomer(id);
+        for (const f of [].concat(cur.logo || [], cur.storefront || [])) {
+          try { if (f.file) fs.unlinkSync(path.join(UPLOAD_DIR, f.file)); } catch (e) {}
+        }
+        try {
+          await store.deleteCustomer(id);
+        } catch (e) {
+          if (e && e.code === 'READ_ONLY') { json(res, 403, { error: e.message }); return; }
+          throw e;
+        }
         json(res, 200, { ok: true });
         return;
       }
@@ -366,6 +391,7 @@ const server = http.createServer(async (req, res) => {
       // find target customer (client passes id) — text parts arrive as Buffers
       const cid = String((parts.find(x => x.name === 'customerId') || {}).data || '').trim();
       const cur = await store.getCustomer(cid);
+      if (!cur) { json(res, 404, { error: 'not found' }); return; }
       const { kept, saved } = sanitizeFiles(files, cur ? cur[field] : []);
       if (cur) {
         cur[field] = kept.concat(saved).slice(0, field === 'logo' ? 2 : 5);
@@ -388,4 +414,5 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log('Customer Profile Database running at http://localhost:' + PORT);
   console.log('Password: ' + (process.env.APP_PASSWORD ? '(from APP_PASSWORD env)' : 'thanvasu2026 (default)'));
+  console.log('Data source: ThanvasuInfo.Tbl_Rest (tvsdb2) + local CustomerProfileDB overlays');
 });

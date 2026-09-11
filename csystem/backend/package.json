@@ -1,0 +1,19 @@
+{
+  "name": "csystem-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CSystem API — shops, services Y/E/N, users",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "import": "node scripts/import-thanvasu.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "exceljs": "^4.4.0",
+    "iconv-lite": "^0.7.3",
+    "odbc": "^2.5.0"
+  }
+}

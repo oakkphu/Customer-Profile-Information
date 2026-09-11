@@ -89,10 +89,16 @@ data/uploads/             — รูปที่อัปโหลด (สร้
 1. Backup ฐานข้อมูล `CustomerProfileDB` บน SQL Server
 2. คัดลอกโฟลเดอร์ `data/uploads/`
 
-## แก้ปัญหาเบื้องต้น
+## แหล่งข้อมูล
+
+- **หลัก:** SQL Server `tvsdb2.thanvasupos.com` → ฐาน `ThanvasuInfo` → ตาราง `dbo.Tbl_Rest` (ร้านในระบบ THANVASU — ดูอย่างเดียว)
+- **เสริม:** `CustomerProfileDB` บนเครื่องนี้ สำหรับโปรไฟล์ที่เพิ่มเองผ่านเว็บ
+
+คัดลอก `.env.example` เป็น `.env` แล้วใส่ `DB_PASS` ก่อนรัน
 
 | อาการ | ตรวจ |
 |-------|------|
-| ข้อความ “เชื่อมต่อฐานข้อมูลไม่ได้…” | SQL รันอยู่หรือยัง, ODBC Driver 17, `DB_*` / firewall, รัน `sql/setup.sql` แล้วหรือยัง |
+| ข้อความ “เชื่อมต่อฐานข้อมูลไม่ได้…” | SQL รันอยู่หรือยัง, ODBC Driver 17, ค่าใน `.env` (`DB_HOST` / `DB_PASS`), เครือข่ายถึง tvsdb2 |
+| รายการว่าง | ตรวจว่า `.env` ชี้ `DB_NAME=ThanvasuInfo` และ login สำเร็จ |
 | `npm install` ล้มที่ `odbc` | ติดตั้ง build tools ตามที่แพ็กเกจ `odbc` ต้องการบน Windows |
-| เข้าหน้าได้แต่ไม่มีรูป | มีไฟล์ใน `data/uploads/` และ login แล้ว |
+| เข้าหน้าได้แต่ไม่มีรูป | URL logo จากระบบ / มีไฟล์ใน `data/uploads/` และ login แล้ว |

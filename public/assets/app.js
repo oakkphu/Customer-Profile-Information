@@ -10,6 +10,10 @@ const state = {
   customers: [],
   q: '',
   typeFilter: '',
+  systemFilter: '',
+  profileFilter: '',    // '' | 'filled' | 'empty'
+  page: 1,
+  pageSize: 24,
   dbError: null,        // last DB connection error message (list)
   current: null,        // detail customer
   draft: null,          // form model
@@ -157,6 +161,9 @@ function shell(content, active) {
 function clearFilters() {
   state.q = '';
   state.typeFilter = '';
+  state.systemFilter = '';
+  state.profileFilter = '';
+  state.page = 1;
   renderDashboard();
 }
 
@@ -167,14 +174,44 @@ function bizLabel(t) {
   if (t === 'Other') return 'อื่น ๆ';
   return t;
 }
+function bizOptionLabel(t) {
+  return t.en + ' — ' + t.th;
+}
+function hasProfileData(c) {
+  return !!(c.businessType || c.hasOverlay || (c.systems && c.systems.length) || c.ownerName || c.coordinatorName || c.contactEmail);
+}
 function filtered() {
   const q = state.q.trim().toLowerCase();
   return state.customers.filter(c => {
-    if (state.typeFilter && c.businessType !== state.typeFilter) return false;
+    if (state.typeFilter === '__unset__') {
+      if (c.businessType) return false;
+    } else if (state.typeFilter && c.businessType !== state.typeFilter) {
+      return false;
+    }
+    if (state.systemFilter && !(c.systems || []).includes(state.systemFilter)) return false;
+    if (state.profileFilter === 'filled' && !hasProfileData(c)) return false;
+    if (state.profileFilter === 'empty' && hasProfileData(c)) return false;
     if (!q) return true;
     return [c.code, c.shopNameTh, c.shopNameEn, c.companyNameTh, c.companyNameEn, c.ownerName, c.coordinatorName, c.contactEmail, c.ownerPhone, c.coordinatorPhone]
+      .concat(c.branches || [])
       .join(' ').toLowerCase().includes(q);
   });
+}
+function typeCounts() {
+  const counts = { __unset__: 0 };
+  for (const c of state.customers) {
+    if (!c.businessType) counts.__unset__ += 1;
+    else counts[c.businessType] = (counts[c.businessType] || 0) + 1;
+  }
+  return counts;
+}
+function paged(list) {
+  const size = state.pageSize || 24;
+  const pages = Math.max(1, Math.ceil(list.length / size));
+  if (state.page > pages) state.page = pages;
+  if (state.page < 1) state.page = 1;
+  const start = (state.page - 1) * size;
+  return { pageItems: list.slice(start, start + size), pages, total: list.length, start };
 }
 function cardHtml(c) {
   const sysCount = (c.systems || []).length;
@@ -189,9 +226,12 @@ function cardHtml(c) {
       </div>
       <div class="cust-meta">
         <span class="badge">${esc(c.code || '')}</span>
-        <span class="badge gray">${esc(bizLabel(c.businessType) || 'ไม่ระบุ')}</span>
-        ${c.branchCount ? `<span class="badge gray">${esc(c.branchCount)} สาขา</span>` : ''}
+        ${c.source === 'thanvasu' ? `<span class="badge green">THANVASU</span>` : `<span class="badge gray">โปรไฟล์เพิ่มเอง</span>`}
+        ${c.hasOverlay || c.businessType ? `<span class="badge green">มีโปรไฟล์</span>` : ''}
+        <span class="badge gray">${esc(bizLabel(c.businessType) || (c.source === 'thanvasu' ? 'ยังไม่ระบุประเภท' : 'ไม่ระบุ'))}</span>
+        ${Number(c.branchCount) > 1 ? `<span class="badge green">${esc(c.branchCount)} สาขา</span>` : (c.branchCount ? `<span class="badge gray">1 สาขา</span>` : '')}
       </div>
+      <div class="branch-preview">${(c.branches || []).slice(0, 3).map(b => `<span class="sys-chip">${esc(b)}</span>`).join('')}${(c.branches || []).length > 3 ? `<span class="sys-chip">+${(c.branches.length - 3)} สาขา</span>` : ''}</div>
       <div>${(c.systems || []).slice(0, 4).map(s => `<span class="sys-chip">${esc(s)}</span>`).join('')}${sysCount > 4 ? `<span class="sys-chip">+${sysCount - 4}</span>` : ''}</div>
       <div class="cust-foot">
         <span>${esc(c.ownerNickname || c.ownerName || '—')}</span>
@@ -201,32 +241,79 @@ function cardHtml(c) {
 }
 
 function emptySearchHtml() {
+  const typeHint = state.typeFilter && state.typeFilter !== '__unset__'
+    ? `<div style="margin-top:8px">ยังไม่มีร้านที่ระบุประเภท “${esc(bizLabel(state.typeFilter) || state.typeFilter)}”<br>
+       เปิดร้าน → <b>แก้ไขโปรไฟล์</b> → เลือกประเภทธุรกิจ แล้วบันทึก จึงจะกรองตามหัวข้อนี้ได้</div>`
+    : '';
   return `<div class="empty"><div class="big">ไม่พบรายการ</div><div>ไม่พบรายการที่ตรงกับการค้นหาหรือตัวกรอง</div>
+    ${typeHint}
     <div class="actions"><button type="button" class="btn ghost" id="btnClearFilters">ล้างตัวกรอง</button></div></div>`;
+}
+
+function pagerHtml(pages, total) {
+  if (total === 0) return '';
+  const p = state.page;
+  return `<div class="pager">
+    <button type="button" class="btn ghost sm" id="pgPrev" ${p <= 1 ? 'disabled' : ''}>← ก่อนหน้า</button>
+    <span class="pager-info">หน้า ${p} / ${pages} · แสดง ${Math.min(state.pageSize, total)} จาก ${total} รายการที่กรองแล้ว</span>
+    <button type="button" class="btn ghost sm" id="pgNext" ${p >= pages ? 'disabled' : ''}>ถัดไป →</button>
+  </div>`;
+}
+
+function bindListInteractions() {
+  $$('.cust-card').forEach(el => el.onclick = () => { location.hash = '#c/' + el.dataset.id; });
+  const clearBtn = $('#btnClearFilters');
+  if (clearBtn) clearBtn.onclick = clearFilters;
+  const emptyNew = $('#btnEmptyNew');
+  if (emptyNew) emptyNew.onclick = () => { location.hash = '#new'; };
+  const prev = $('#pgPrev');
+  const next = $('#pgNext');
+  if (prev) prev.onclick = () => { state.page -= 1; refreshListOnly(); };
+  if (next) next.onclick = () => { state.page += 1; refreshListOnly(); };
 }
 
 function renderDashboard() {
   const list = filtered();
+  const { pageItems, pages, total } = paged(list);
   const types = state.meta ? state.meta.businessTypes : BUSINESS_FALLBACK;
-  const cards = list.map(cardHtml).join('');
+  const systems = state.meta ? state.meta.systems : SYSTEMS_FALLBACK;
+  const counts = typeCounts();
+  const typed = state.customers.length - (counts.__unset__ || 0);
+  const cards = pageItems.map(cardHtml).join('');
   const banner = state.dbError
     ? `<div class="db-banner" role="alert">${esc(state.dbError)}</div>`
+    : '';
+  const typeHint = typed === 0
+    ? `<div class="db-banner">ประเภทธุรกิจยังไม่ได้ระบุในโปรไฟล์ — กดเข้าไปที่ร้านแล้วเลือก <b>แก้ไขโปรไฟล์</b> เพื่อกำหนดประเภท (เช่น ร้านอาหาร / คาเฟ่) จากนั้นตัวกรองด้านบนจะใช้งานได้</div>`
     : '';
 
   shell(`
     <div class="page-head">
       <h2>รายการลูกค้า</h2>
-      <span class="count">${list.length} รายการ${state.customers.length !== list.length ? ' (จากทั้งหมด ' + state.customers.length + ')' : ''}</span>
+      <span class="count">${total} รายการ${state.customers.length !== total ? ' (จากทั้งหมด ' + state.customers.length + ')' : ''}</span>
       <div class="spacer"></div>
     </div>
     ${banner}
-    <div class="toolbar">
+    ${typeHint}
+    <div class="toolbar filters">
       <input type="search" id="q" placeholder="ค้นหาชื่อร้าน บริษัท เจ้าของ เบอร์ อีเมล รหัส…" value="${esc(state.q)}">
-      <select id="typeFilter">
-        <option value="">ประเภทธุรกิจทั้งหมด</option>
-        ${types.map(t => `<option value="${esc(t.en)}" ${state.typeFilter === t.en ? 'selected' : ''}>${esc(t.th)}</option>`).join('')}
+      <select id="typeFilter" title="ประเภทธุรกิจ">
+        <option value="">ประเภทธุรกิจทั้งหมด (${state.customers.length})</option>
+        <option value="__unset__" ${state.typeFilter === '__unset__' ? 'selected' : ''}>ยังไม่ระบุประเภท (${counts.__unset__ || 0})</option>
+        ${types.map(t => `<option value="${esc(t.en)}" ${state.typeFilter === t.en ? 'selected' : ''}>${esc(bizOptionLabel(t))} (${counts[t.en] || 0})</option>`).join('')}
       </select>
+      <select id="systemFilter" title="ระบบที่ใช้">
+        <option value="">ระบบทั้งหมด</option>
+        ${systems.map(s => `<option value="${esc(s)}" ${state.systemFilter === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}
+      </select>
+      <select id="profileFilter" title="สถานะโปรไฟล์">
+        <option value="" ${state.profileFilter === '' ? 'selected' : ''}>โปรไฟล์ทั้งหมด</option>
+        <option value="filled" ${state.profileFilter === 'filled' ? 'selected' : ''}>กรอกโปรไฟล์แล้ว</option>
+        <option value="empty" ${state.profileFilter === 'empty' ? 'selected' : ''}>ยังไม่กรอกโปรไฟล์</option>
+      </select>
+      <button type="button" class="btn ghost sm" id="btnClearFiltersTop">ล้างตัวกรอง</button>
     </div>
+    ${pagerHtml(pages, total)}
     ${state.customers.length === 0 && !state.dbError ? `
       <div class="empty"><div class="big">ยังไม่มีข้อมูลลูกค้า</div><div>เริ่มต้นด้วยการเพิ่มโปรไฟล์ลูกค้ารายแรก</div>
       <div class="actions"><button class="btn" id="btnEmptyNew">เพิ่มลูกค้ารายแรก</button></div></div>`
@@ -234,37 +321,26 @@ function renderDashboard() {
       <div class="empty"><div class="big">โหลดข้อมูลไม่ได้</div><div>แก้ไขการเชื่อมต่อฐานข้อมูลแล้วลองรีเฟรชหน้า</div></div>`
       : list.length === 0 ? emptySearchHtml()
       : `<div class="grid">${cards}</div>`}
+    ${list.length ? pagerHtml(pages, total) : ''}
   `, 'home');
 
-  $('#q').addEventListener('input', e => { state.q = e.target.value; refreshListOnly(); });
-  $('#typeFilter').addEventListener('change', e => { state.typeFilter = e.target.value; refreshListOnly(); });
-  $$('.cust-card').forEach(el => el.onclick = () => { location.hash = '#c/' + el.dataset.id; });
-  const clearBtn = $('#btnClearFilters');
-  if (clearBtn) clearBtn.onclick = clearFilters;
-  const emptyNew = $('#btnEmptyNew');
-  if (emptyNew) emptyNew.onclick = () => { location.hash = '#new'; };
+  $('#q').addEventListener('input', e => { state.q = e.target.value; state.page = 1; refreshListOnly(); });
+  $('#typeFilter').addEventListener('change', e => { state.typeFilter = e.target.value; state.page = 1; refreshListOnly(); });
+  $('#systemFilter').addEventListener('change', e => { state.systemFilter = e.target.value; state.page = 1; refreshListOnly(); });
+  $('#profileFilter').addEventListener('change', e => { state.profileFilter = e.target.value; state.page = 1; refreshListOnly(); });
+  const clearTop = $('#btnClearFiltersTop');
+  if (clearTop) clearTop.onclick = clearFilters;
+  bindListInteractions();
 }
 function refreshListOnly() {
-  // re-render only the list area to keep focus in search box
-  const list = filtered();
-  const gridHost = $('.container');
-  const head = $('.page-head .count');
-  if (head) head.innerHTML = `${list.length} รายการ${state.customers.length !== list.length ? ' (จากทั้งหมด ' + state.customers.length + ')' : ''}`;
-  const grid = gridHost.querySelector('.grid');
-  const emptyBox = gridHost.querySelector('.empty');
-  const cards = list.map(cardHtml).join('');
-  if (state.customers.length === 0) { /* keep initial empty state */ return; }
-  if (list.length === 0) {
-    const html = emptySearchHtml();
-    if (grid) grid.outerHTML = html;
-    else if (emptyBox) emptyBox.outerHTML = html;
-    const clearBtn = $('#btnClearFilters');
-    if (clearBtn) clearBtn.onclick = clearFilters;
-  } else {
-    if (emptyBox) emptyBox.outerHTML = `<div class="grid">${cards}</div>`;
-    else if (grid) grid.innerHTML = cards;
+  const qEl = $('#q');
+  const start = qEl ? qEl.selectionStart : null;
+  renderDashboard();
+  const q2 = $('#q');
+  if (q2) {
+    q2.focus();
+    if (start != null) try { q2.setSelectionRange(start, start); } catch (e) {}
   }
-  $$('.cust-card').forEach(el => el.onclick = () => { location.hash = '#c/' + el.dataset.id; });
 }
 
 /* ================= DETAIL ================= */
@@ -287,13 +363,14 @@ function renderDetail() {
         <div class="sub">${esc([c.shopNameEn, c.companyNameTh, c.companyNameEn].filter(Boolean).join(' • ') || '—')}</div>
         <div style="margin-top:8px" class="cust-meta">
           <span class="badge">${esc(c.code || '')}</span>
-          <span class="badge gray">${esc(bizLabel(c.businessType) || 'ไม่ระบุ')}</span>
-          ${c.branchCount ? `<span class="badge gray">${esc(c.branchCount)} สาขา</span>` : ''}
+          ${c.source === 'thanvasu' ? `<span class="badge green">THANVASU</span>` : ''}
+          <span class="badge gray">${esc(bizLabel(c.businessType) || (c.source === 'thanvasu' ? 'ยังไม่ระบุประเภท' : 'ไม่ระบุ'))}</span>
+          ${Number(c.branchCount) > 1 ? `<span class="badge green">${esc(c.branchCount)} สาขา</span>` : (c.branchCount ? `<span class="badge gray">1 สาขา</span>` : '')}
         </div>
       </div>
       <div class="actions">
-        <button class="btn" id="btnEdit">แก้ไข</button>
-        <button class="btn danger" id="btnDelete">ลบ</button>
+        <button class="btn" id="btnEdit">${c.source === 'thanvasu' ? 'แก้ไขโปรไฟล์' : 'แก้ไข'}</button>
+        ${c.source === 'thanvasu' ? '' : `<button class="btn danger" id="btnDelete">ลบ</button>`}
       </div>
     </div>
 
@@ -307,7 +384,11 @@ function renderDetail() {
           <dt>Company Name (EN)</dt><dd>${esc(c.companyNameEn) || none}</dd>
           <dt>ประเภทธุรกิจ</dt><dd>${esc(bizLabel(c.businessType) || none)}${c.businessType === 'Other' && c.businessTypeOther ? ' — ' + esc(c.businessTypeOther) : ''}</dd>
           <dt>จำนวนสาขา</dt><dd>${esc(c.branchCount) || none}</dd>
-          <dt>ชื่อสาขา</dt><dd>${(c.branches && c.branches.length) ? c.branches.map(b => `<span class="sys-chip">${esc(b)}</span>`).join('') : none}</dd>
+          <dt>ชื่อสาขา</dt><dd>${
+            (c.branchDetails && c.branchDetails.length)
+              ? `<ul class="branch-list">${c.branchDetails.map(b => `<li><span class="sys-chip">${esc(b.name)}</span>${b.branchNo != null ? ` <span class="hint">#${esc(b.branchNo)}</span>` : ''} <span class="hint">ID ${esc(b.id)}</span></li>`).join('')}</ul>`
+              : ((c.branches && c.branches.length) ? c.branches.map(b => `<span class="sys-chip">${esc(b)}</span>`).join('') : none)
+          }</dd>
           <dt>Website / Social</dt><dd>${c.website ? `<a href="${esc(c.website)}" target="_blank" rel="noopener">${esc(c.website)}</a>` : none}</dd>
           <dt>เจ้าของ/ผู้บริหาร</dt><dd>${esc([c.ownerName, c.ownerNickname && ('"' + c.ownerNickname + '"')].filter(Boolean).join(' ')) || none}</dd>
           <dt>เบอร์เจ้าของ</dt><dd>${esc(c.ownerPhone) || none}</dd>
@@ -339,17 +420,25 @@ function renderDetail() {
       <div class="panel">
         <h3><span class="num">4</span> Others — รูปภาพ</h3>
         <div style="font-size:13px;color:var(--muted);margin-bottom:8px">Logo ร้าน (1–2 รูป)</div>
-        <div class="gallery">${(c.logo || []).map(f => `<img src="/files/${esc(f.file)}" data-full="/files/${esc(f.file)}" alt="logo">`).join('') || '<div class="hint">ไม่มีรูป</div>'}</div>
+        <div class="gallery">${(c.logo || []).map(f => {
+          const src = f.url || (f.file ? '/files/' + f.file : '');
+          return src ? `<img src="${esc(src)}" data-full="${esc(src)}" alt="logo">` : '';
+        }).join('') || '<div class="hint">ไม่มีรูป</div>'}</div>
         <div style="font-size:13px;color:var(--muted);margin:14px 0 8px">รูปหน้าร้าน / บรรยากาศ (3–5 รูป)</div>
-        <div class="gallery">${(c.storefront || []).map(f => `<img src="/files/${esc(f.file)}" data-full="/files/${esc(f.file)}" alt="storefront">`).join('') || '<div class="hint">ไม่มีรูป</div>'}</div>
+        <div class="gallery">${(c.storefront || []).map(f => {
+          const src = f.url || (f.file ? '/files/' + f.file : '');
+          return src ? `<img src="${esc(src)}" data-full="${esc(src)}" alt="storefront">` : '';
+        }).join('') || '<div class="hint">ไม่มีรูป</div>'}</div>
         <div class="hint" style="margin-top:12px">อัปเดตล่าสุด: ${esc(fmtDateTime(c.updatedAt))}</div>
       </div>
     </div>
   `, 'detail');
 
   $('.back-link').onclick = e => { e.preventDefault(); location.hash = ''; };
-  $('#btnEdit').onclick = () => { location.hash = '#edit/' + c.id; };
-  $('#btnDelete').onclick = async () => {
+  const btnEdit = $('#btnEdit');
+  if (btnEdit) btnEdit.onclick = () => { location.hash = '#edit/' + c.id; };
+  const btnDelete = $('#btnDelete');
+  if (btnDelete) btnDelete.onclick = async () => {
     if (!confirm('ลบข้อมูลลูกค้า "' + (c.shopNameTh || c.shopNameEn || c.code) + '" ถาวร?')) return;
     try {
       await api('/api/customers/' + c.id, { method: 'DELETE' });
@@ -413,7 +502,8 @@ function renderForm() {
 
   shell(`
     <a class="back-link" href="#">← ยกเลิก กลับไปหน้ารายการ</a>
-    <div class="page-head"><h2>${editing ? 'แก้ไขข้อมูล: ' + esc(d.shopNameTh || d.shopNameEn || '') : 'เพิ่มลูกค้าใหม่'}</h2></div>
+    <div class="page-head"><h2>${editing ? 'แก้ไขโปรไฟล์: ' + esc(d.shopNameTh || d.shopNameEn || '') : 'เพิ่มลูกค้าใหม่'}</h2></div>
+    ${editing && state.current && state.current.source === 'thanvasu' ? `<div class="db-banner">บันทึกเป็นโปรไฟล์เสริมในเครื่อง — ไม่แก้ข้อมูลหลักในระบบ THANVASU</div>` : ''}
     <div class="wizard-head">
       ${STEP_NAMES.map((n, i) => {
         const s = i + 1;
@@ -432,7 +522,7 @@ function renderForm() {
           <label class="req">ประเภทธุรกิจ</label>
           <select name="businessType">
             <option value="">— เลือกประเภทธุรกิจ —</option>
-            ${types.map(t => `<option value="${esc(t.en)}" ${d.businessType === t.en ? 'selected' : ''}>${esc(t.th)}</option>`).join('')}
+            ${types.map(t => `<option value="${esc(t.en)}" ${d.businessType === t.en ? 'selected' : ''}>${esc(bizOptionLabel(t))}</option>`).join('')}
           </select>
         </div>
         <div class="full" id="otherTypeWrap" style="display:${d.businessType === 'Other' ? 'block' : 'none'}">

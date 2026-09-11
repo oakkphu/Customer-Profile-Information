@@ -1,0 +1,13 @@
+{
+  "name": "csystem-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CSystem UI — static SPA + API proxy",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

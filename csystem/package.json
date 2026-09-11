@@ -1,0 +1,13 @@
+{
+  "name": "csystem",
+  "version": "1.0.0",
+  "private": true,
+  "description": "THANVASU CSystem — frontend + backend",
+  "scripts": {
+    "start": "node start.js",
+    "install:all": "npm --prefix backend install"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
