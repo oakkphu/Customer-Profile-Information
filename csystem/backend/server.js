@@ -1,11 +1,35 @@
 'use strict';
 const http = require('http');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const store = require('./db');
 
-const PORT = Number(process.env.APP_PORT || 3220) || 3220;
+// พอร์ตเดียว: Coolify/Docker ใช้ PORT (เช่น 3000) — เสิร์ฟทั้ง UI + API
+const PORT = Number(process.env.PORT || process.env.APP_PORT || 3220) || 3220;
+const HOST = process.env.HOST || '0.0.0.0';
+const FRONTEND_ROOT = path.resolve(
+  process.env.FRONTEND_ROOT || path.join(__dirname, '..', 'frontend')
+);
+const SERVE_FRONTEND = process.env.SERVE_FRONTEND !== '0'
+  && fs.existsSync(path.join(FRONTEND_ROOT, 'index.html'));
 const SESSION_TTL = 12 * 60 * 60 * 1000;
 const sessions = new Map();
+
+const STATIC_MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.map': 'application/json',
+};
 
 function send(res, code, body, headers) {
   const h = Object.assign({ 'Cache-Control': 'no-store' }, headers || {});
@@ -15,6 +39,32 @@ function send(res, code, body, headers) {
 function json(res, code, obj) {
   send(res, code, JSON.stringify(obj, (_k, v) => typeof v === 'bigint' ? Number(v) : v), {
     'Content-Type': 'application/json; charset=utf-8',
+  });
+}
+
+function serveFrontend(req, res, pathname) {
+  if (!SERVE_FRONTEND) {
+    json(res, 404, { error: 'ไม่พบ API ที่ต้องการ' });
+    return;
+  }
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    send(res, 405, 'Method Not Allowed');
+    return;
+  }
+  let rel = pathname === '/' || pathname === '/login' ? '/index.html' : pathname;
+  // กัน path traversal
+  const file = path.normalize(path.join(FRONTEND_ROOT, rel));
+  if (!file.startsWith(FRONTEND_ROOT)) {
+    send(res, 403, 'Forbidden');
+    return;
+  }
+  const index = path.join(FRONTEND_ROOT, 'index.html');
+  const target = (fs.existsSync(file) && fs.statSync(file).isFile()) ? file : index;
+  const buf = fs.readFileSync(target);
+  const ext = path.extname(target).toLowerCase();
+  send(res, 200, req.method === 'HEAD' ? '' : buf, {
+    'Content-Type': STATIC_MIME[ext] || 'application/octet-stream',
+    'Content-Length': String(buf.length),
   });
 }
 function parseCookies(req) {
@@ -71,7 +121,20 @@ function requireAuth(req, res) {
 function requireAdmin(req, res) {
   const s = requireAuth(req, res);
   if (!s) return null;
-  if (s.role !== 'Admin') { json(res, 403, { error: 'สำหรับผู้ดูแลระบบเท่านั้น' }); return null; }
+  if (!store.isAdminRole(s.role)) {
+    json(res, 403, { error: 'สำหรับผู้ดูแลระบบเท่านั้น' });
+    return null;
+  }
+  return s;
+}
+
+function requireSuperAdmin(req, res) {
+  const s = requireAuth(req, res);
+  if (!s) return null;
+  if (!store.isSuperAdminRole(s.role)) {
+    json(res, 403, { error: 'สำหรับ Super Admin เท่านั้น' });
+    return null;
+  }
   return s;
 }
 
@@ -119,8 +182,20 @@ const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname;
 
+    // พอร์ตเดียว: นอก /api/* เสิร์ฟหน้าเว็บจาก frontend/
+    if (!p.startsWith('/api/')) {
+      serveFrontend(req, res, p);
+      return;
+    }
+
     if (p === '/api/health' && req.method === 'GET') {
-      json(res, 200, { ok: true, service: 'csystem-backend' });
+      json(res, 200, { ok: true, service: 'csystem', port: PORT, serveFrontend: SERVE_FRONTEND });
+      return;
+    }
+
+    if (p === '/api/health/db' && req.method === 'GET') {
+      const db = await store.pingDb();
+      json(res, db.ok ? 200 : 503, db);
       return;
     }
 
@@ -166,7 +241,25 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/me' && req.method === 'GET') {
       const s = getSession(req);
       if (!s) { json(res, 401, { authed: false }); return; }
-      json(res, 200, { authed: true, user: { id: s.userId, username: s.username, role: s.role } });
+      try {
+        const user = await store.findUserById(s.userId);
+        if (!user || !(user.is_active === true || user.is_active === 1 || user.is_active === '1')) {
+          sessions.delete(s.token);
+          json(res, 401, { authed: false });
+          return;
+        }
+        const live = sessions.get(s.token);
+        if (live) {
+          live.username = user.username;
+          live.role = user.role;
+        }
+        json(res, 200, {
+          authed: true,
+          user: { id: Number(user.id), username: user.username, role: user.role },
+        });
+      } catch (e) {
+        json(res, 200, { authed: true, user: { id: s.userId, username: s.username, role: s.role } });
+      }
       return;
     }
 
@@ -205,8 +298,14 @@ const server = http.createServer(async (req, res) => {
       const s = requireAuth(req, res); if (!s) return;
       const body = JSON.parse((await readBody(req, 20 * 1024 * 1024)).toString('utf8') || '{}');
       if (!String(body.name || '').trim()) { json(res, 400, { error: 'กรุณากรอกชื่อร้าน' }); return; }
-      const shop = await store.createShop(shopBodyFromJson(body), s.userId);
-      json(res, 201, { shop });
+      if (!String(body.startDate || '').trim()) { json(res, 400, { error: 'กรุณากรอกวันเริ่มใช้ระบบ' }); return; }
+      try {
+        const shop = await store.createShop(shopBodyFromJson(body), s.userId);
+        json(res, 201, { shop });
+      } catch (e) {
+        if (e && e.code === 'BRANCH_COUNT_MISMATCH') { json(res, 400, { error: e.message }); return; }
+        throw e;
+      }
       return;
     }
 
@@ -216,7 +315,9 @@ const server = http.createServer(async (req, res) => {
       const file = await store.getMediaFile(Number(m[1]));
       if (!file) { json(res, 404, { error: 'ไม่พบรูป' }); return; }
       const fs = require('fs');
-      const buf = fs.readFileSync(file.path);
+      const buf = file.buffer
+        || (file.path && fs.existsSync(file.path) ? fs.readFileSync(file.path) : null);
+      if (!buf || !buf.length) { json(res, 404, { error: 'ไม่พบรูป' }); return; }
       send(res, 200, buf, {
         'Content-Type': file.mime || 'application/octet-stream',
         'Content-Length': String(buf.length),
@@ -273,9 +374,15 @@ const server = http.createServer(async (req, res) => {
         const s = requireAuth(req, res); if (!s) return;
         const body = JSON.parse((await readBody(req, 20 * 1024 * 1024)).toString('utf8') || '{}');
         if (!String(body.name || '').trim()) { json(res, 400, { error: 'กรุณากรอกชื่อร้าน' }); return; }
-        const shop = await store.updateShop(id, shopBodyFromJson(body), s.userId);
-        if (!shop) { json(res, 404, { error: 'ไม่พบร้าน' }); return; }
-        json(res, 200, { shop });
+        if (!String(body.startDate || '').trim()) { json(res, 400, { error: 'กรุณากรอกวันเริ่มใช้ระบบ' }); return; }
+        try {
+          const shop = await store.updateShop(id, shopBodyFromJson(body), s.userId);
+          if (!shop) { json(res, 404, { error: 'ไม่พบร้าน' }); return; }
+          json(res, 200, { shop });
+        } catch (e) {
+          if (e && e.code === 'BRANCH_COUNT_MISMATCH') { json(res, 400, { error: e.message }); return; }
+          throw e;
+        }
         return;
       }
       if (req.method === 'DELETE') {
@@ -289,7 +396,19 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/reports/summary' && req.method === 'GET') {
       if (!requireAuth(req, res)) return;
-      json(res, 200, await store.reportSummary());
+      json(res, 200, await store.reportSummary({
+        from: url.searchParams.get('from') || '',
+        to: url.searchParams.get('to') || '',
+        businessType: url.searchParams.get('businessType') || '',
+      }));
+      return;
+    }
+
+    if (p === '/api/overview/brands' && req.method === 'GET') {
+      if (!requireAuth(req, res)) return;
+      json(res, 200, await store.brandBranchOverview({
+        businessType: url.searchParams.get('businessType') || '',
+      }));
       return;
     }
 
@@ -343,7 +462,7 @@ const server = http.createServer(async (req, res) => {
           username: body.username,
           password: body.password,
           role: body.role,
-        }, s.userId);
+        }, s.userId, s.role);
         json(res, 201, { user });
       } catch (e) {
         json(res, 400, { error: e.message || 'สร้างผู้ใช้ไม่สำเร็จ' });
@@ -355,7 +474,7 @@ const server = http.createServer(async (req, res) => {
       const s = requireAdmin(req, res); if (!s) return;
       const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
       try {
-        const user = await store.setUserActive(Number(m[1]), !!body.isActive, s.userId);
+        const user = await store.setUserActive(Number(m[1]), !!body.isActive, s.userId, s.role);
         if (!user) { json(res, 404, { error: 'ไม่พบผู้ใช้' }); return; }
         json(res, 200, { user: {
           id: Number(user.id),
@@ -383,8 +502,11 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     console.error('ensureAdmin failed — run sql/setup.sql and check .env', e.message || e);
   }
-  server.listen(PORT, () => {
-    console.log('CSystem backend (API) at http://localhost:' + PORT);
-    console.log('DB:', process.env.DB_NAME || 'BD_CSystem', '@', process.env.DB_HOST || 'tvsdb2');
+  server.listen(PORT, HOST, () => {
+    console.log('CSystem listening on http://' + HOST + ':' + PORT);
+    console.log('  API      /api/*');
+    console.log('  Frontend', SERVE_FRONTEND ? FRONTEND_ROOT : '(disabled)');
+    console.log('  Uploads ', require('./profile').UPLOAD_ROOT);
+    console.log('  DB:', process.env.DB_NAME || 'BD_CSystem', '@', process.env.DB_HOST || 'tvsdb2');
   });
 })();

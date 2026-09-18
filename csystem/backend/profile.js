@@ -19,7 +19,10 @@ const HARDWARE_CATALOG = [
 ];
 
 const IMAGE_LIMITS = { logo: 2, store: 5 };
-const UPLOAD_ROOT = path.join(__dirname, 'uploads');
+/** โฟลเดอร์ไฟล์รูป — ตอน Docker/Coolify ต้อง mount volume มาที่ path นี้ */
+const UPLOAD_ROOT = process.env.UPLOAD_ROOT
+  ? path.resolve(process.env.UPLOAD_ROOT)
+  : path.join(__dirname, 'uploads');
 
 const PROFILE_SHOP_COLUMNS = [
   ['brand_name', 'NVARCHAR(200) NULL'],
@@ -43,34 +46,67 @@ const PROFILE_SHOP_COLUMNS = [
   ['hardware_other', 'NVARCHAR(500) NULL'],
 ];
 
+function newBranchId() {
+  return crypto.randomBytes(8).toString('hex');
+}
+
+function normalizeBranchHardwareList(list) {
+  const arr = Array.isArray(list) ? list : [];
+  return arr.map(h => ({
+    hardwareId: Number(h && (h.hardwareId != null ? h.hardwareId : h.id)) || 0,
+    code: String((h && h.code) || '').trim(),
+    name: String((h && h.name) || '').trim(),
+    qty: Math.max(0, Math.min(9999, Number(h && h.qty) || 0)),
+  })).filter(h => h.hardwareId > 0 || h.code);
+}
+
 function parseBranches(raw) {
   if (raw == null || raw === '') return [];
   const s = String(raw).trim();
   if (!s) return [];
+  const fix = (t) => repairThaiTextLocal(String(t || '').trim());
   try {
     const j = JSON.parse(s);
     if (Array.isArray(j)) {
       return j.map(x => {
         if (x && typeof x === 'object') {
           return {
-            name: String(x.name || x.branch || '').trim(),
-            province: String(x.province || '').trim(),
+            id: String(x.id || '').trim(),
+            name: fix(x.name || x.branch || ''),
+            province: fix(x.province || ''),
             mapUrl: String(x.mapUrl || x.map || '').trim(),
           };
         }
-        return { name: String(x || '').trim(), province: '', mapUrl: '' };
+        return { id: '', name: fix(x || ''), province: '', mapUrl: '' };
       }).filter(b => b.name);
     }
   } catch (_) {}
   return s.split(/\r?\n|;/).map(line => {
-    const name = String(line || '').trim();
-    return name ? { name, province: '', mapUrl: '' } : null;
+    const name = fix(line || '');
+    return name ? { id: '', name, province: '', mapUrl: '' } : null;
   }).filter(Boolean);
+}
+
+/** ซ่อมข้อความไทยเพี้ยนแบบเบา ๆ (ไม่ดึง db กัน circular require) */
+function repairThaiTextLocal(raw) {
+  let s = String(raw == null ? '' : raw);
+  if (!s) return s;
+  // น + ํ + ็ + า → น้ำ (ลำดับสระผิด)
+  s = s.replace(/\u0E19\u0E4D\u0E47\u0E32/g, 'น้ำ');
+  if (!/à¸|à¹|Ã.|Â.|เธ/.test(s) && !/[\u0080-\u00ff]{2,}/.test(s)) return s;
+  try {
+    const bytes = Buffer.alloc(s.length);
+    for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i) & 0xff;
+    const fixed = bytes.toString('utf8');
+    if (fixed && !fixed.includes('\uFFFD') && /[\u0E00-\u0E7F]/.test(fixed)) return fixed;
+  } catch (_) {}
+  return s;
 }
 
 function serializeBranches(list) {
   const arr = Array.isArray(list) ? list : parseBranches(list);
   const clean = arr.map(x => ({
+    id: String((x && x.id) || '').trim() || newBranchId(),
     name: String((x && x.name) || '').trim(),
     province: String((x && x.province) || '').trim(),
     mapUrl: String((x && x.mapUrl) || '').trim(),
@@ -88,17 +124,51 @@ function normalizeBranches(data) {
   } else if (data.branchNames != null) {
     branches = parseBranches(data.branchNames);
   }
-  branches = branches.map(x => ({
-    name: String((x && x.name) || '').trim(),
-    province: String((x && x.province) || '').trim(),
-    mapUrl: String((x && x.mapUrl) || '').trim(),
-  })).filter(b => b.name);
+  const seen = new Set();
+  branches = branches.map(x => {
+    let id = String((x && x.id) || '').trim();
+    if (!id || seen.has(id)) id = newBranchId();
+    seen.add(id);
+    return {
+      id,
+      name: String((x && x.name) || '').trim(),
+      province: String((x && x.province) || '').trim(),
+      mapUrl: String((x && x.mapUrl) || '').trim(),
+      hardware: normalizeBranchHardwareList(x && x.hardware),
+    };
+  }).filter(b => b.name);
   let count = data.branchCount != null && data.branchCount !== ''
     ? Number(data.branchCount)
     : (branches.length || null);
   if (count != null && (!Number.isFinite(count) || count < 0)) count = branches.length || null;
   if (count != null) count = Math.min(9999, Math.floor(count));
+  if (count != null && count !== branches.length) {
+    const err = new Error(
+      `จำนวนสาขาที่กรอกเป็น ${count} ต้องเพิ่มชื่อสาขาให้ครบ ${count} รายการ (ตอนนี้มี ${branches.length})`
+    );
+    err.code = 'BRANCH_COUNT_MISMATCH';
+    throw err;
+  }
   return { branches, branchCount: count, branchNamesJson: serializeBranches(branches) };
+}
+
+function aggregateHardwareFromBranches(branches) {
+  const totals = new Map();
+  for (const b of branches || []) {
+    for (const h of b.hardware || []) {
+      const key = Number(h.hardwareId) || String(h.code || '');
+      if (!key) continue;
+      const prev = totals.get(key) || {
+        hardwareId: Number(h.hardwareId) || 0,
+        code: h.code || '',
+        name: h.name || '',
+        qty: 0,
+      };
+      prev.qty += Number(h.qty) || 0;
+      totals.set(key, prev);
+    }
+  }
+  return [...totals.values()];
 }
 
 function ensureUploadRoot() {
@@ -158,6 +228,20 @@ async function ensureProfileSchema(cn) {
       )
     `);
   }
+  const shopBranchHw = await cn.query(`SELECT OBJECT_ID(N'dbo.ShopBranchHardware', N'U') AS id`);
+  if (!shopBranchHw.length || shopBranchHw[0].id == null) {
+    await cn.query(`
+      CREATE TABLE dbo.ShopBranchHardware (
+        shop_id INT NOT NULL,
+        branch_id NVARCHAR(40) NOT NULL,
+        hardware_id INT NOT NULL,
+        qty INT NOT NULL CONSTRAINT DF_SBH_qty DEFAULT 0,
+        CONSTRAINT PK_ShopBranchHardware PRIMARY KEY (shop_id, branch_id, hardware_id),
+        CONSTRAINT FK_SBH_Shop FOREIGN KEY (shop_id) REFERENCES dbo.Shops(id) ON DELETE CASCADE,
+        CONSTRAINT FK_SBH_Hw FOREIGN KEY (hardware_id) REFERENCES dbo.HardwareCatalog(id)
+      )
+    `);
+  }
   const imgs = await cn.query(`SELECT OBJECT_ID(N'dbo.ShopImages', N'U') AS id`);
   if (!imgs.length || imgs[0].id == null) {
     await cn.query(`
@@ -170,11 +254,21 @@ async function ensureProfileSchema(cn) {
         mime NVARCHAR(80) NULL,
         size_bytes INT NULL,
         sort_order INT NOT NULL CONSTRAINT DF_SI_sort DEFAULT 0,
+        file_data VARBINARY(MAX) NULL,
         created_at DATETIME2 NOT NULL CONSTRAINT DF_SI_created DEFAULT (${SQL_NOW_TH}),
         CONSTRAINT FK_SI_Shop FOREIGN KEY (shop_id) REFERENCES dbo.Shops(id) ON DELETE CASCADE,
         CONSTRAINT CK_SI_kind CHECK (kind IN (N'logo', N'store'))
       )
     `);
+  } else {
+    const cols = await cn.query(`
+      SELECT COLUMN_NAME AS n FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'ShopImages'
+    `);
+    const have = new Set(cols.map(c => String(c.n).toLowerCase()));
+    if (!have.has('file_data')) {
+      await cn.query(`ALTER TABLE dbo.ShopImages ADD file_data VARBINARY(MAX) NULL`);
+    }
   }
 
   for (const h of HARDWARE_CATALOG) {
@@ -203,28 +297,44 @@ function profileSelectFragment(alias) {
 }
 
 function mapProfileFields(r) {
-  const branches = parseBranches(r.branch_names);
+  const fix = (v) => {
+    const s = String(v == null ? '' : v);
+    if (!s) return '';
+    return repairThaiFilename(s);
+  };
+  const branches = parseBranches(r.branch_names).map(b => ({
+    id: String(b.id || '').trim(),
+    name: fix(b.name),
+    province: fix(b.province),
+    mapUrl: String(b.mapUrl || '').trim(),
+  }));
+  // ensure stable ids in memory (persisted on next save)
+  const seen = new Set();
+  for (const b of branches) {
+    if (!b.id || seen.has(b.id)) b.id = newBranchId();
+    seen.add(b.id);
+  }
   return {
-    brandName: r.brand_name || '',
-    companyNameTh: r.company_name_th || '',
-    companyNameEn: r.company_name_en || '',
+    brandName: fix(r.brand_name),
+    companyNameTh: fix(r.company_name_th),
+    companyNameEn: fix(r.company_name_en),
     branchCount: r.branch_count != null ? Number(r.branch_count) : (branches.length || null),
     branches,
     branchNames: branches.map(b => b.name),
-    websiteSocial: r.website_social || '',
-    facebookUrl: r.facebook_url || '',
-    instagramUrl: r.instagram_url || '',
-    ownerName: r.owner_name || '',
-    ownerNickname: r.owner_nickname || '',
-    ownerPhone: r.owner_phone || '',
-    contactName: r.contact_name || '',
-    contactNickname: r.contact_nickname || '',
-    contactPhone: r.contact_phone || '',
-    contactEmail: r.contact_email || '',
-    contactLine: r.contact_line || '',
-    contactOther: r.contact_other || '',
-    systemFlow: r.system_flow || '',
-    hardwareOther: r.hardware_other || '',
+    websiteSocial: fix(r.website_social),
+    facebookUrl: String(r.facebook_url || '').trim(),
+    instagramUrl: String(r.instagram_url || '').trim(),
+    ownerName: fix(r.owner_name),
+    ownerNickname: fix(r.owner_nickname),
+    ownerPhone: String(r.owner_phone || ''),
+    contactName: fix(r.contact_name),
+    contactNickname: fix(r.contact_nickname),
+    contactPhone: String(r.contact_phone || ''),
+    contactEmail: String(r.contact_email || ''),
+    contactLine: String(r.contact_line || ''),
+    contactOther: fix(r.contact_other),
+    systemFlow: fix(r.system_flow),
+    hardwareOther: fix(r.hardware_other),
   };
 }
 
@@ -254,7 +364,12 @@ function profilePayloadFromData(data) {
     contactOther: String(data.contactOther || '').trim(),
     systemFlow: String(data.systemFlow || '').trim(),
     hardwareOther: String(data.hardwareOther || '').trim(),
-    hardware: Array.isArray(data.hardware) ? data.hardware : [],
+    branches: b.branches,
+    hardware: (() => {
+      const fromBranches = aggregateHardwareFromBranches(b.branches);
+      if (fromBranches.length) return fromBranches;
+      return Array.isArray(data.hardware) ? data.hardware : [];
+    })(),
   };
 }
 
@@ -288,10 +403,65 @@ async function listShopHardware(cn, shopId) {
   }));
 }
 
+async function listShopBranchHardware(cn, shopId) {
+  const exists = await cn.query(`SELECT OBJECT_ID(N'dbo.ShopBranchHardware', N'U') AS id`);
+  if (!exists.length || exists[0].id == null) return [];
+  const rows = await cn.query(
+    `SELECT branch_id AS branchId, hardware_id AS hardwareId, ISNULL(qty, 0) AS qty
+     FROM ShopBranchHardware WHERE shop_id = ?`,
+    [shopId]
+  );
+  return rows.map(r => ({
+    branchId: String(r.branchId || r.branch_id || '').trim(),
+    hardwareId: Number(r.hardwareId != null ? r.hardwareId : r.hardware_id),
+    qty: Number(r.qty || 0),
+  }));
+}
+
+function emptyHardwareFromCatalog(catalog) {
+  return (catalog || []).map(c => ({
+    hardwareId: Number(c.id != null ? c.id : c.hardwareId),
+    code: c.code,
+    name: c.name,
+    sortOrder: Number(c.sortOrder || 0),
+    qty: 0,
+  }));
+}
+
+async function attachHardwareToBranches(cn, shopId, branches, shopHardware) {
+  const catalog = await listHardwareCatalog(cn);
+  const list = Array.isArray(branches) ? branches : [];
+  const rows = await listShopBranchHardware(cn, shopId);
+  const byBranch = new Map();
+  for (const r of rows) {
+    if (!r.branchId) continue;
+    if (!byBranch.has(r.branchId)) byBranch.set(r.branchId, new Map());
+    byBranch.get(r.branchId).set(Number(r.hardwareId), Number(r.qty || 0));
+  }
+  const hasBranchData = byBranch.size > 0;
+  const legacyHasQty = (shopHardware || []).some(h => Number(h.qty) > 0);
+  let legacyAssigned = false;
+
+  for (let i = 0; i < list.length; i++) {
+    const b = list[i];
+    const qtyMap = byBranch.get(b.id) || new Map();
+    let hardware = emptyHardwareFromCatalog(catalog).map(h => ({
+      ...h,
+      qty: qtyMap.has(h.hardwareId) ? qtyMap.get(h.hardwareId) : 0,
+    }));
+    if (!hasBranchData && legacyHasQty && !legacyAssigned && i === 0) {
+      const legacy = new Map((shopHardware || []).map(h => [Number(h.hardwareId), Number(h.qty || 0)]));
+      hardware = hardware.map(h => ({ ...h, qty: legacy.get(h.hardwareId) || 0 }));
+      b.hardwareLegacy = true;
+      legacyAssigned = true;
+    }
+    b.hardware = hardware;
+  }
+  return list;
+}
+
 async function saveShopHardware(cn, shopId, hardwareList) {
   const catalog = await listHardwareCatalog(cn);
-  const byId = new Map(catalog.map(c => [c.id, c]));
-  const byCode = new Map(catalog.map(c => [c.code, c]));
   const items = Array.isArray(hardwareList) ? hardwareList : [];
   for (const c of catalog) {
     const hit = items.find(x =>
@@ -308,8 +478,64 @@ async function saveShopHardware(cn, shopId, hardwareList) {
       await cn.query('INSERT INTO ShopHardware (shop_id, hardware_id, qty) VALUES (?,?,?)', [shopId, c.id, qty]);
     }
   }
-  // silence unused
-  void byId; void byCode;
+}
+
+async function saveShopBranchHardware(cn, shopId, branches) {
+  const exists = await cn.query(`SELECT OBJECT_ID(N'dbo.ShopBranchHardware', N'U') AS id`);
+  if (!exists.length || exists[0].id == null) {
+    await cn.query(`
+      CREATE TABLE dbo.ShopBranchHardware (
+        shop_id INT NOT NULL,
+        branch_id NVARCHAR(40) NOT NULL,
+        hardware_id INT NOT NULL,
+        qty INT NOT NULL CONSTRAINT DF_SBH_qty DEFAULT 0,
+        CONSTRAINT PK_ShopBranchHardware PRIMARY KEY (shop_id, branch_id, hardware_id),
+        CONSTRAINT FK_SBH_Shop FOREIGN KEY (shop_id) REFERENCES dbo.Shops(id) ON DELETE CASCADE,
+        CONSTRAINT FK_SBH_Hw FOREIGN KEY (hardware_id) REFERENCES dbo.HardwareCatalog(id)
+      )
+    `);
+  }
+  const catalog = await listHardwareCatalog(cn);
+  const list = Array.isArray(branches) ? branches.filter(b => b && b.id && b.name) : [];
+  const keepIds = list.map(b => String(b.id));
+
+  if (keepIds.length) {
+    const ph = keepIds.map(() => '?').join(',');
+    await cn.query(
+      `DELETE FROM ShopBranchHardware WHERE shop_id = ? AND branch_id NOT IN (${ph})`,
+      [shopId, ...keepIds]
+    );
+  } else {
+    await cn.query('DELETE FROM ShopBranchHardware WHERE shop_id = ?', [shopId]);
+  }
+
+  for (const b of list) {
+    const items = Array.isArray(b.hardware) ? b.hardware : [];
+    for (const c of catalog) {
+      const hit = items.find(x =>
+        Number(x.hardwareId) === c.id || String(x.code || '') === c.code
+      );
+      const qty = hit ? Math.max(0, Math.min(9999, Number(hit.qty) || 0)) : 0;
+      const row = await cn.query(
+        'SELECT 1 AS x FROM ShopBranchHardware WHERE shop_id=? AND branch_id=? AND hardware_id=?',
+        [shopId, b.id, c.id]
+      );
+      if (row.length) {
+        await cn.query(
+          'UPDATE ShopBranchHardware SET qty=? WHERE shop_id=? AND branch_id=? AND hardware_id=?',
+          [qty, shopId, b.id, c.id]
+        );
+      } else {
+        await cn.query(
+          'INSERT INTO ShopBranchHardware (shop_id, branch_id, hardware_id, qty) VALUES (?,?,?,?)',
+          [shopId, b.id, c.id, qty]
+        );
+      }
+    }
+  }
+
+  const totals = aggregateHardwareFromBranches(list);
+  await saveShopHardware(cn, shopId, totals);
 }
 
 async function seedShopHardware(cn, shopId) {
@@ -327,21 +553,56 @@ async function listShopImages(cn, shopId) {
   const rows = await cn.query(
     `SELECT id, shop_id AS shopId, kind, stored_name AS storedName, original_name AS originalName,
             mime, size_bytes AS sizeBytes, sort_order AS sortOrder,
-            CONVERT(varchar(30), created_at, 126) AS createdAt
+            CONVERT(varchar(30), created_at, 126) AS createdAt,
+            CASE WHEN file_data IS NULL THEN 0 ELSE 1 END AS hasData
      FROM ShopImages WHERE shop_id = ? ORDER BY kind, sort_order, id`,
     [shopId]
   );
-  return rows.map(r => ({
-    id: Number(r.id),
-    shopId: Number(r.shopId),
-    kind: r.kind,
-    originalName: repairThaiFilename(r.originalName || ''),
-    mime: r.mime || '',
-    sizeBytes: Number(r.sizeBytes || 0),
-    sortOrder: Number(r.sortOrder || 0),
-    createdAt: r.createdAt,
-    url: '/api/media/' + Number(r.id),
-  }));
+  const out = [];
+  for (const r of rows) {
+    const rec = {
+      id: Number(r.id),
+      shopId: Number(r.shopId != null ? r.shopId : r.shop_id),
+      kind: r.kind,
+      storedName: r.storedName || r.stored_name,
+      originalName: repairThaiFilename(r.originalName || r.original_name || ''),
+      mime: r.mime || '',
+      sizeBytes: Number(r.sizeBytes != null ? r.sizeBytes : r.size_bytes || 0),
+      sortOrder: Number(r.sortOrder != null ? r.sortOrder : r.sort_order || 0),
+      createdAt: r.createdAt || r.created_at,
+      url: '/api/media/' + Number(r.id),
+      hasData: Number(r.hasData || r.has_data || 0) === 1,
+    };
+    const onDisk = fs.existsSync(absoluteImagePath(rec));
+    if (!rec.hasData && !onDisk) {
+      try {
+        await cn.query('DELETE FROM ShopImages WHERE id = ?', [rec.id]);
+      } catch (_) {}
+      continue;
+    }
+    // มีไฟล์บนดิสก์แต่ยังไม่เข้า DB — ย้ายเข้า DB ให้ถาวร
+    if (!rec.hasData && onDisk) {
+      try {
+        await saveImageBlob(cn, rec.id, fs.readFileSync(absoluteImagePath(rec)));
+        rec.hasData = true;
+      } catch (e) {
+        console.warn('[uploads] migrate disk→db fail id=' + rec.id, e.message || e);
+      }
+    }
+    // มีใน DB แต่ยังไม่มีแคชดิสก์ — เขียนแคชเงียบ ๆ ให้รอบถัดไปเร็ว
+    if (rec.hasData && !onDisk) {
+      try {
+        const blob = await readImageBlob(cn, rec.id);
+        if (blob && blob.length) {
+          const dir = path.join(UPLOAD_ROOT, 'shop-' + rec.shopId);
+          if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(absoluteImagePath(rec), blob);
+        }
+      } catch (_) {}
+    }
+    out.push(rec);
+  }
+  return out;
 }
 
 /** NVARCHAR literal — ODBC bind ? มักทำให้ชื่อไฟล์ไทยเพี้ยน */
@@ -349,13 +610,34 @@ function sqlN(str) {
   return "N'" + String(str == null ? '' : str).replace(/'/g, "''") + "'";
 }
 
-/** แก้ชื่อไฟล์ไทยที่ ODBC/SQL เก็บผิด (UTF-8 ถูกตีเป็น Windows-874) */
+/** แก้ชื่อไฟล์/ข้อความไทยที่ ODBC/SQL เก็บผิด (UTF-8 ถูกตีเป็น Windows-874 หรือ Latin-1) */
 function repairThaiFilename(name) {
   const s = String(name || '');
   if (!s) return '';
+
+  const looksBytes = (() => {
+    for (let i = 0; i < s.length - 2; i++) {
+      const a = s.charCodeAt(i);
+      const b = s.charCodeAt(i + 1);
+      const c = s.charCodeAt(i + 2);
+      if (a === 0xe0 && (b === 0xb8 || b === 0xb9) && c >= 0x80 && c <= 0xbf) return true;
+    }
+    return false;
+  })();
   const hits = (s.match(/เธ/g) || []).length;
-  const hasLow = /[\x80-\xff]/.test(s);
-  if (hits < 2 && !hasLow && !/เน[€]/.test(s)) return s.slice(0, 260);
+  const latinHits = (s.match(/à¸|à¹|Ã.|Â./g) || []).length;
+  const hasLow = /[\u0080-\u00ff]/.test(s);
+  if (!looksBytes && hits < 2 && latinHits < 1 && !hasLow && !/เน[€]/.test(s)) {
+    return s.slice(0, 260);
+  }
+
+  try {
+    const bytes = Buffer.alloc(s.length);
+    for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i) & 0xff;
+    const fixed = bytes.toString('utf8');
+    if (fixed && !fixed.includes('\uFFFD') && /[\u0E00-\u0E7F]/.test(fixed)) return fixed.slice(0, 260);
+  } catch (_) {}
+
   try {
     const iconv = require('iconv-lite');
     const bytes = [];
@@ -376,10 +658,6 @@ function repairThaiFilename(name) {
       return fixed.slice(0, 260);
     }
   } catch (_) {}
-  try {
-    const fixed = Buffer.from(s, 'latin1').toString('utf8');
-    if (fixed && !fixed.includes('\uFFFD') && /[\u0E00-\u0E7F]/.test(fixed)) return fixed.slice(0, 260);
-  } catch (_) {}
   return s.slice(0, 260);
 }
 
@@ -392,6 +670,78 @@ function extFromMime(mime, originalName) {
   const ext = path.extname(String(originalName || '')).toLowerCase();
   if (['.png', '.jpg', '.jpeg', '.webp', '.gif'].includes(ext)) return ext === '.jpeg' ? '.jpg' : ext;
   return '.bin';
+}
+
+async function saveImageBlob(cn, imageId, buf) {
+  const data = Buffer.isBuffer(buf) ? buf : Buffer.from(buf || []);
+  if (!data.length) throw new Error('ไฟล์ว่าง');
+  try {
+    await cn.query('UPDATE ShopImages SET file_data = ? WHERE id = ?', [data, Number(imageId)]);
+    return;
+  } catch (e1) {
+    // ODBC บางตัว bind Buffer ไม่ได้ — ส่งเป็น hex literal
+    const hex = data.toString('hex').toUpperCase();
+    await cn.query(
+      `UPDATE ShopImages SET file_data = CONVERT(varbinary(max), 0x${hex}) WHERE id = ?`,
+      [Number(imageId)]
+    );
+  }
+}
+
+async function readImageBlob(cn, imageId) {
+  const rows = await cn.query(
+    `SELECT file_data AS fileData FROM ShopImages WHERE id = ?`,
+    [Number(imageId)]
+  );
+  if (!rows.length || rows[0].fileData == null && rows[0].file_data == null) return null;
+  const raw = rows[0].fileData != null ? rows[0].fileData : rows[0].file_data;
+  if (Buffer.isBuffer(raw)) return raw;
+  if (raw && raw.buffer) return Buffer.from(raw.buffer || raw);
+  if (typeof raw === 'string') {
+    // บาง driver ส่ง binary เป็น latin1 string
+    return Buffer.from(raw, 'binary');
+  }
+  try {
+    return Buffer.from(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function migrateDiskImagesIntoDb(cn) {
+  let migrated = 0;
+  let skipped = 0;
+  try {
+    const rows = await cn.query(`
+      SELECT id, shop_id AS shopId, stored_name AS storedName
+      FROM ShopImages
+      WHERE file_data IS NULL
+    `);
+    for (const r of rows) {
+      const rec = {
+        id: Number(r.id),
+        shopId: Number(r.shopId != null ? r.shopId : r.shop_id),
+        storedName: r.storedName || r.stored_name,
+      };
+      const fp = absoluteImagePath(rec);
+      if (!fs.existsSync(fp)) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        await saveImageBlob(cn, rec.id, fs.readFileSync(fp));
+        migrated += 1;
+      } catch (e) {
+        console.warn('[uploads] migrate id=' + rec.id, e.message || e);
+      }
+    }
+  } catch (e) {
+    console.warn('[uploads] migrateDiskImagesIntoDb', e.message || e);
+  }
+  if (migrated || skipped) {
+    console.log('[uploads] disk→DB migrated=' + migrated + ' missing-on-disk=' + skipped);
+  }
+  return { migrated, skipped };
 }
 
 async function addShopImage(cn, shopId, { kind, originalName, mime, dataBase64 }) {
@@ -418,10 +768,14 @@ async function addShopImage(cn, shopId, { kind, originalName, mime, dataBase64 }
   if (!/^image\/(png|jpeg|jpg|webp|gif)$/i.test(safeMime) && !/\.(png|jpe?g|webp|gif)$/i.test(safeOriginal)) {
     throw new Error('รองรับเฉพาะไฟล์รูป PNG / JPG / WEBP / GIF');
   }
-  ensureUploadRoot();
   const stored = crypto.randomBytes(16).toString('hex') + extFromMime(safeMime, safeOriginal);
-  const dir = shopUploadDir(shopId);
-  fs.writeFileSync(path.join(dir, stored), buf);
+  // เขียนลงดิสก์เป็นแคช (best-effort) — แหล่งจริงคือ DB
+  try {
+    ensureUploadRoot();
+    fs.writeFileSync(path.join(shopUploadDir(shopId), stored), buf);
+  } catch (e) {
+    console.warn('[uploads] disk cache write failed (DB still stores image)', e.message || e);
+  }
   const sortRows = await cn.query(
     'SELECT ISNULL(MAX(sort_order),0)+1 AS n FROM ShopImages WHERE shop_id=? AND kind=?',
     [shopId, k]
@@ -434,7 +788,9 @@ async function addShopImage(cn, shopId, { kind, originalName, mime, dataBase64 }
      VALUES (?, ?, ${sqlN(stored)}, ${sqlN(displayName)}, ${sqlN(safeMime)}, ?, ?)`,
     [shopId, k, buf.length, sortOrder]
   );
-  return Number(ins[0].id);
+  const imageId = Number(ins[0].id);
+  await saveImageBlob(cn, imageId, buf);
+  return imageId;
 }
 
 /** ซ่อมชื่อไฟล์ไทยที่เพี้ยนใน ShopImages */
@@ -460,13 +816,25 @@ async function getImageRecord(cn, imageId) {
     `SELECT id, shop_id AS shopId, kind, stored_name AS storedName, original_name AS originalName,
             mime, size_bytes AS sizeBytes
      FROM ShopImages WHERE id = ?`,
-    [imageId]
+    [Number(imageId)]
   );
-  return rows[0] || null;
+  const r = rows[0];
+  if (!r) return null;
+  return {
+    id: Number(r.id),
+    shopId: Number(r.shopId != null ? r.shopId : r.shop_id),
+    kind: r.kind,
+    storedName: r.storedName || r.stored_name,
+    originalName: r.originalName || r.original_name,
+    mime: r.mime,
+    sizeBytes: Number(r.sizeBytes != null ? r.sizeBytes : r.size_bytes || 0),
+  };
 }
 
 function absoluteImagePath(rec) {
-  return path.join(UPLOAD_ROOT, 'shop-' + Number(rec.shopId), rec.storedName);
+  const shopId = Number(rec.shopId != null ? rec.shopId : rec.shop_id);
+  const stored = String(rec.storedName || rec.stored_name || '');
+  return path.join(UPLOAD_ROOT, 'shop-' + shopId, stored);
 }
 
 async function deleteShopImage(cn, imageId) {
@@ -495,8 +863,13 @@ module.exports = {
   profilePayloadFromData,
   listHardwareCatalog,
   listShopHardware,
+  listShopBranchHardware,
+  attachHardwareToBranches,
   saveShopHardware,
+  saveShopBranchHardware,
   seedShopHardware,
+  aggregateHardwareFromBranches,
+  newBranchId,
   listShopImages,
   addShopImage,
   repairShopImageNames,
@@ -507,4 +880,9 @@ module.exports = {
   deleteShopUploadDir,
   parseBranchNames,
   serializeBranchNames,
+  parseBranches,
+  serializeBranches,
+  saveImageBlob,
+  readImageBlob,
+  migrateDiskImagesIntoDb,
 };

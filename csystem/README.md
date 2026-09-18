@@ -63,26 +63,42 @@ ORDER BY shop_name;
 - **E** = มีปัญหา / รอซ่อม
 - **N** = ปิดชั่วคราว
 
-## Deploy ด้วย Docker / Coolify
+## รันด้วย Docker บนเครื่อง (แนะนำ)
+
+1. `copy .env.example .env` แล้วใส่ `DB_PASS` จริงใน `.env` (อย่า commit ไฟล์นี้)
+2. ดับเบิลคลิก `run-docker.cmd` หรือรัน `docker compose up --build`
+3. เปิด http://localhost:3001
+
+Compose จะอ่าน `.env` ให้อัตโนมัติ — ไม่ต้องพิมพ์ `--env-file` เอง
+
+## Deploy ด้วย Docker / Coolify / Kube
 
 ไฟล์พร้อมใช้: `Dockerfile`, `docker-compose.yml`, `.env.example`
 
-### Coolify
+แอปฟัง **พอร์ตเดียวใน container** (`PORT=3000`): หน้าเว็บ + `/api/*`
 
-1. **New Resource → Dockerfile** (หรือ Docker Compose)
-2. Git repo + **Base Directory / Build Context = `csystem`**
-3. **Port = `3000`** (UI และ `/api` ในคอนเทนเนอร์เดียว)
-4. Environment ตาม `.env.example` อย่างน้อย: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASS`, `APP_SESSION_SECRET`, `ADMIN_PASSWORD`, `COOKIE_SECURE=1`
-5. Persistent Storage → `/app/backend/uploads`
-6. Deploy แล้วเปิดโดเมนจาก Coolify
+### เก็บรูปถาวร
 
-เซิร์ฟเวอร์ Coolify ต้องเชื่อมต่อ SQL Server (`DB_HOST:DB_PORT`) ได้
+รูปเก็บใน **BD_CSystem** ตาราง `ShopImages.file_data` (VARBINARY) เป็นหลัก  
+โฟลเดอร์ `uploads` เป็นแคชเสริมเท่านั้น — **redeploy / ลบ volume แล้วรูปยังอยู่** ถ้า DB ยังอยู่
 
-### ทดสอบ Docker บนเครื่อง
+สำรองข้อมูล: backup **BD_CSystem** ก็พอครอบคลุมรูปแล้ว  
+(volume `/app/backend/uploads` ยังแนะนำไว้เพื่อแคชเร็ว แต่ไม่บังคับเพื่อความถาวร)
+
+### Coolify / Rancher / Kube — ใส่ Env ยังไงให้ปลอดภัย
+
+1. ตัวแปรทั่วไป → ประเภท **Key/Value Pair**  
+   `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_ENCRYPT`, `PORT`, `DOCKER=1`, `ODBC_DRIVER=ODBC Driver 18 for SQL Server`, `COOKIE_SECURE=1`, `UPLOAD_ROOT=/app/backend/uploads`
+2. รหัสลับ → ประเภท **Secret** (ถ้ามี)  
+   `DB_PASS`, `APP_SESSION_SECRET`, `ADMIN_PASSWORD`
+3. Save → Redeploy ( Persistent Storage สำหรับ uploads เป็นทางเลือก )
+4. ดู log ต้องเป็น `DB_PASS=set`
+
+อย่าพึ่งให้ระบบดึง `.env` จาก Git — รหัสจะหลุด
+
+### ทดสอบ image เดี่ยวๆ
 
 ```bash
-cd csystem
-cp .env.example .env   # ใส่ DB_PASS / secrets
-docker compose up --build
-# เปิด http://localhost:3000
+docker run --rm -p 3001:3000 --env-file .env ^
+  thanvasu/web-cssystem:v1.0.4
 ```

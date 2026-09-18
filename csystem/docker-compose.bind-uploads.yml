@@ -1,0 +1,17 @@
+# Optional: bind uploads to a host folder instead of Docker named volume
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.bind-uploads.yml up --build
+#
+# ตั้ง path บนเครื่องใน .env เช่น
+#   UPLOADS_HOST_PATH=D:/csystem-uploads
+#
+# Coolify ไม่ต้องใช้ไฟล์นี้ — ใช้ Persistent Storage ใน UI แทน
+
+services:
+  csystem:
+    volumes:
+      - type: bind
+        source: ${UPLOADS_HOST_PATH:?ตั้ง UPLOADS_HOST_PATH ใน .env ก่อน}
+        target: /app/backend/uploads
+        bind:
+          create_host_path: true

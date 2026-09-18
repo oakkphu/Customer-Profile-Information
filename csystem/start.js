@@ -2,16 +2,18 @@
 /**
  * รัน CSystem ทั้งระบบด้วยคำสั่งเดียว:
  *   npm start
- * หรือ
- *   node start.js
+ *
+ * โหมด Docker / รวมพอร์ต: รัน backend ตัวเดียว (เสิร์ฟ UI + API)
+ * โหมด dev แยกพอร์ต: ตั้ง SPLIT_PORTS=1 แล้วจะเปิด UI proxy แยก
  */
 const { spawn, execFileSync } = require('child_process');
 const http = require('http');
 const path = require('path');
 
 const root = __dirname;
+const DOCKER = process.env.DOCKER === '1';
+const SPLIT = process.env.SPLIT_PORTS === '1' && !DOCKER;
 const API_PORT = Number(process.env.APP_PORT || 3220) || 3220;
-// Coolify / Docker มักส่ง PORT เป็นพอร์ตสาธารณะ — ใช้เป็น UI
 const UI_PORT = Number(process.env.PORT || process.env.FRONTEND_PORT || 3230) || 3230;
 const kids = [];
 let shuttingDown = false;
@@ -74,16 +76,11 @@ function freePort(port) {
   }
 }
 
-function freePorts() {
-  freePort(API_PORT);
-  freePort(UI_PORT);
-}
-
-function run(tag, cwd, script) {
+function run(tag, cwd, script, envExtra) {
   const child = spawn(process.execPath, [script], {
     cwd,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: process.env,
+    env: Object.assign({}, process.env, envExtra || {}),
     windowsHide: true,
   });
   prefixPipe(child.stdout, tag, process.stdout);
@@ -138,33 +135,45 @@ function waitHealth(url, tries) {
 }
 
 console.log('');
-console.log('  CSystem — เริ่มต้นทั้งระบบ (คำสั่งเดียว)');
+console.log('  CSystem — เริ่มต้นทั้งระบบ');
 console.log('  -----------------------------------------');
-if (process.env.DOCKER === '1') {
-  // ใน container ไม่ปลดพอร์ตด้วย kill (อาจกระทบ process อื่น)
-  process.env.FRONTEND_PORT = String(UI_PORT);
-  process.env.APP_PORT = String(API_PORT);
-  if (!process.env.API_ORIGIN) {
-    process.env.API_ORIGIN = 'http://127.0.0.1:' + API_PORT;
-  }
+
+if (SPLIT) {
+  freePort(API_PORT);
+  freePort(UI_PORT);
+  run('api', path.join(root, 'backend'), 'server.js', {
+    PORT: String(API_PORT),
+    APP_PORT: String(API_PORT),
+    SERVE_FRONTEND: '0',
+  });
+  run('ui', path.join(root, 'frontend'), 'server.js', {
+    PORT: String(UI_PORT),
+    FRONTEND_PORT: String(UI_PORT),
+    API_ORIGIN: 'http://127.0.0.1:' + API_PORT,
+  });
+  waitHealth('http://127.0.0.1:' + API_PORT + '/api/health', 40).then(ok => {
+    console.log('');
+    console.log(ok ? '  Backend  พร้อม  http://localhost:' + API_PORT : '  Backend  ยังไม่ตอบ health');
+    console.log('  Frontend พร้อม  http://localhost:' + UI_PORT + '  ← เปิดที่นี่');
+    console.log('');
+  });
 } else {
-  freePorts();
+  // ค่าเริ่มต้น: พอร์ตเดียว (UI + API) — เหมาะกับ Docker / Coolify / ใช้งานปกติ
+  if (!DOCKER) freePort(UI_PORT);
+  const listenPort = DOCKER ? (Number(process.env.PORT) || 3000) : UI_PORT;
+  run('app', path.join(root, 'backend'), 'server.js', {
+    PORT: String(listenPort),
+    HOST: process.env.HOST || '0.0.0.0',
+    SERVE_FRONTEND: '1',
+    FRONTEND_ROOT: path.join(root, 'frontend'),
+  });
+  waitHealth('http://127.0.0.1:' + listenPort + '/api/health', 40).then(ok => {
+    console.log('');
+    console.log(ok ? '  พร้อมแล้ว  http://localhost:' + listenPort + '  (UI + API)' : '  ยังไม่ตอบ health — ตรวจ .env / DB');
+    console.log('  กด Ctrl+C เพื่อหยุด');
+    console.log('');
+  });
 }
-
-run('api', path.join(root, 'backend'), 'server.js');
-run('ui', path.join(root, 'frontend'), 'server.js');
-
-waitHealth('http://127.0.0.1:' + API_PORT + '/api/health', 40).then(ok => {
-  console.log('');
-  if (ok) {
-    console.log('  Backend  พร้อม  http://localhost:' + API_PORT);
-  } else {
-    console.log('  Backend  ยังไม่ตอบ health — ตรวจ .env / DB');
-  }
-  console.log('  Frontend พร้อม  http://localhost:' + UI_PORT + '  ← เปิดที่นี่');
-  console.log('  กด Ctrl+C เพื่อหยุดทั้งคู่');
-  console.log('');
-});
 
 process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));

@@ -1,37 +1,37 @@
-# Local / Coolify-compatible stack (single public port)
 services:
   csystem:
     build: .
-    image: csystem:latest
-    ports:
-      - "${PORT:-3000}:3000"
+    image: thanvasu/web-cssystem:local
+    # ดึงรหัสจากไฟล์ .env อัตโนมัติ (ไฟล์นี้อยู่นอก Git)
+    env_file:
+      - .env
     environment:
-      NODE_ENV: production
       DOCKER: "1"
+      HOST: "0.0.0.0"
       PORT: "3000"
-      FRONTEND_PORT: "3000"
-      APP_PORT: "3220"
-      API_ORIGIN: http://127.0.0.1:3220
-      ODBC_DRIVER: ODBC Driver 18 for SQL Server
+      SERVE_FRONTEND: "1"
+      FRONTEND_ROOT: /app/frontend
+      ODBC_DRIVER: "ODBC Driver 18 for SQL Server"
+      # localhost ใช้ HTTP — ปิด Secure cookie
       COOKIE_SECURE: "${COOKIE_SECURE:-0}"
-      DB_HOST: "${DB_HOST}"
-      DB_PORT: "${DB_PORT:-28914}"
-      DB_NAME: "${DB_NAME:-BD_CSystem}"
-      DB_USER: "${DB_USER}"
-      DB_PASS: "${DB_PASS}"
-      DB_ENCRYPT: "${DB_ENCRYPT:-yes}"
-      APP_SESSION_SECRET: "${APP_SESSION_SECRET}"
-      ADMIN_PASSWORD: "${ADMIN_PASSWORD}"
-      ADMIN_EMAIL: "${ADMIN_EMAIL:-}"
+      # โฟลเดอร์รูปใน container (ต้องตรงกับ volume ด้านล่าง)
+      UPLOAD_ROOT: /app/backend/uploads
+    ports:
+      # ใช้ 3001 บนเครื่อง (เลี่ยงชนแอปอื่นที่พอร์ต 3000)
+      - "${HOST_PORT:-3001}:3000"
     volumes:
-      - csystem_uploads:/app/backend/uploads
+      # สำคัญ: เก็บรูปถาวร — ไม่หายตอน rebuild / redeploy
+      # Coolify: ตั้ง Persistent Storage → Destination = /app/backend/uploads
+      - type: volume
+        source: csystem_uploads
+        target: /app/backend/uploads
+        volume:
+          nocopy: true
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 40s
 
 volumes:
   csystem_uploads:
+    name: csystem_uploads
+    labels:
+      app: csystem
+      purpose: shop-images

@@ -1,9 +1,6 @@
 node_modules
 backend/node_modules
 frontend/node_modules
-backend/.env
-.env
-**/.env
 backend/uploads/**
 !backend/uploads/.gitkeep
 **/tmp-*
@@ -21,3 +18,4 @@ scripts
 backend/scripts
 backend/sql
 backend/tmp-*
+# อนุญาต .env เข้า build (bake รหัสตอน docker build) — ยังห้าม commit ขึ้น Git

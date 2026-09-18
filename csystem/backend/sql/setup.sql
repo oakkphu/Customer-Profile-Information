@@ -83,6 +83,18 @@ CREATE TABLE dbo.ShopHardware (
 );
 GO
 
+IF OBJECT_ID(N'dbo.ShopBranchHardware', N'U') IS NULL
+CREATE TABLE dbo.ShopBranchHardware (
+  shop_id INT NOT NULL,
+  branch_id NVARCHAR(40) NOT NULL,
+  hardware_id INT NOT NULL,
+  qty INT NOT NULL CONSTRAINT DF_SBH_qty DEFAULT 0,
+  CONSTRAINT PK_ShopBranchHardware PRIMARY KEY (shop_id, branch_id, hardware_id),
+  CONSTRAINT FK_SBH_Shop FOREIGN KEY (shop_id) REFERENCES dbo.Shops(id) ON DELETE CASCADE,
+  CONSTRAINT FK_SBH_Hw FOREIGN KEY (hardware_id) REFERENCES dbo.HardwareCatalog(id)
+);
+GO
+
 IF OBJECT_ID(N'dbo.ShopImages', N'U') IS NULL
 CREATE TABLE dbo.ShopImages (
   id BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
@@ -93,10 +105,15 @@ CREATE TABLE dbo.ShopImages (
   mime NVARCHAR(80) NULL,
   size_bytes INT NULL,
   sort_order INT NOT NULL CONSTRAINT DF_SI_sort DEFAULT 0,
+  file_data VARBINARY(MAX) NULL,
   created_at DATETIME2 NOT NULL CONSTRAINT DF_SI_created DEFAULT (CAST(SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'SE Asia Standard Time' AS DATETIME2)),
   CONSTRAINT FK_SI_Shop FOREIGN KEY (shop_id) REFERENCES dbo.Shops(id) ON DELETE CASCADE,
   CONSTRAINT CK_SI_kind CHECK (kind IN (N'logo', N'store'))
 );
+GO
+
+IF COL_LENGTH(N'dbo.ShopImages', N'file_data') IS NULL
+  ALTER TABLE dbo.ShopImages ADD file_data VARBINARY(MAX) NULL;
 GO
 
 IF OBJECT_ID(N'dbo.ServiceCatalog', N'U') IS NULL
@@ -197,7 +214,7 @@ GO
 -- Hash is scrypt format: scrypt$N$r$p$saltB64$hashB64 — seeded by app if missing
 IF NOT EXISTS (SELECT 1 FROM dbo.Users WHERE username = N'admin')
 INSERT INTO dbo.Users (username, password_hash, role) VALUES
-  (N'admin', N'PLACEHOLDER_SET_BY_APP', N'Admin');
+  (N'admin', N'PLACEHOLDER_SET_BY_APP', N'SuperAdmin');
 GO
 
 -- View อ่านง่ายใน SSMS: มีชื่อร้าน + ชื่อระบบ ไม่ต้องจำ id

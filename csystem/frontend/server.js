@@ -85,7 +85,7 @@ const server = http.createServer((req, res) => {
   serveStatic(req, res, url.pathname);
 });
 
-server.listen(PORT, () => {
-  console.log('CSystem frontend at http://localhost:' + PORT);
+server.listen(PORT, process.env.HOST || '0.0.0.0', () => {
+  console.log('CSystem frontend at http://' + (process.env.HOST || '0.0.0.0') + ':' + PORT);
   console.log('Proxy /api → ' + API_ORIGIN);
 });

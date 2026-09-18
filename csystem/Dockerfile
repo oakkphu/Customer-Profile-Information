@@ -1,15 +1,19 @@
 # CSystem — production image for Coolify / Docker
+# พอร์ตเดียว (PORT=3000): เสิร์ฟทั้งหน้าเว็บ + /api/*
+#
+# โหมดง่าย: ตอน build จะใส่ไฟล์ .env เข้า image (ต้องมี .env ในโฟลเดอร์นี้)
+# ระวัง: ใครดึง image ไปได้จะอ่านรหัสใน image ได้ — ใช้ registry ส่วนตัวเท่านั้น
 FROM node:20-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     DOCKER=1 \
     NODE_ENV=production \
-    APP_PORT=3220 \
     PORT=3000 \
-    FRONTEND_PORT=3000 \
-    API_ORIGIN=http://127.0.0.1:3220 \
-    ODBC_DRIVER=ODBC Driver 18 for SQL Server \
-    COOKIE_SECURE=1
+    HOST=0.0.0.0 \
+    SERVE_FRONTEND=1 \
+    FRONTEND_ROOT=/app/frontend \
+    COOKIE_SECURE=1 \
+    PREFER_DOTENV=1
 
 WORKDIR /app
 
@@ -20,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential python3 \
     && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
       | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg \
-    && echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" \
       > /etc/apt/sources.list.d/mssql-release.list \
     && apt-get update \
     && ACCEPT_EULA=Y apt-get install -y --no-install-recommends msodbcsql18 \
@@ -35,16 +39,18 @@ RUN npm --prefix backend install --omit=dev \
 
 COPY backend ./backend
 COPY frontend ./frontend
-COPY start.js ./
-
-RUN mkdir -p /app/backend/uploads \
+COPY docker-entrypoint.sh ./
+# bake รหัสจากเครื่องที่ build (ต้องมีไฟล์ .env)
+COPY .env /app/.env
+RUN cp /app/.env /app/backend/.env \
+    && sed -i 's/\r$//' /app/.env /app/backend/.env /app/docker-entrypoint.sh \
+    && chmod +x /app/docker-entrypoint.sh \
+    && mkdir -p /app/backend/uploads \
     && chown -R node:node /app
 
-USER node
+# entrypoint รันเป็น root เพื่อ chown volume แล้วค่อยสลับเป็น node
+USER root
 
 EXPOSE 3000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:${PORT:-3000}/api/health" || exit 1
-
-CMD ["node", "start.js"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

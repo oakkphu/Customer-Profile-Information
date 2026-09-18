@@ -6,17 +6,29 @@ const odbc = require('odbc');
 const profile = require('./profile');
 
 function loadEnv() {
-  const p = path.join(__dirname, '.env');
-  if (!fs.existsSync(p)) return;
-  for (const line of fs.readFileSync(p, 'utf8').split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t || t.startsWith('#')) continue;
-    const i = t.indexOf('=');
-    if (i < 1) continue;
-    const k = t.slice(0, i).trim();
-    let v = t.slice(i + 1).trim();
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-    if (process.env[k] === undefined) process.env[k] = v;
+  const prefer = process.env.PREFER_DOTENV === '1';
+  const candidates = [
+    path.join(__dirname, '.env'),
+    path.join(__dirname, '..', '.env'),
+    '/app/.env',
+    '/app/backend/.env',
+  ];
+  for (const p of candidates) {
+    if (!fs.existsSync(p)) continue;
+    let loaded = 0;
+    for (const line of fs.readFileSync(p, 'utf8').split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const i = t.indexOf('=');
+      if (i < 1) continue;
+      const k = t.slice(0, i).trim();
+      let v = t.slice(i + 1).trim();
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+      if (!prefer && process.env[k] !== undefined) continue;
+      process.env[k] = v;
+      loaded += 1;
+    }
+    console.log('[env] loaded', p, '(' + loaded + ' keys' + (prefer ? ', prefer-file' : '') + ')');
   }
 }
 loadEnv();
@@ -25,9 +37,12 @@ loadEnv();
 const SQL_NOW_TH =
   "CAST(SYSUTCDATETIME() AT TIME ZONE 'UTC' AT TIME ZONE 'SE Asia Standard Time' AS DATETIME2)";
 
-/** ค่า NVARCHAR ใน SQL — เลี่ยง bind ? ที่ ODBC ทำไทยเพี้ยนบนเซิร์ฟเวอร์ Thai collation */
+/** ค่า NVARCHAR ใน SQL — ส่งเป็น UTF-16LE hex เลี่ยง client charset ของ ODBC ที่ทำให้ไทยเพี้ยน */
 function sqlN(str) {
-  return "N'" + String(str == null ? '' : str).replace(/'/g, "''") + "'";
+  const s = String(str == null ? '' : str);
+  if (s === '') return "N''";
+  const hex = Buffer.from(s, 'utf16le').toString('hex').toUpperCase();
+  return `CONVERT(nvarchar(max), 0x${hex})`;
 }
 
 function sqlNOrNull(str) {
@@ -35,13 +50,30 @@ function sqlNOrNull(str) {
   return sqlN(str);
 }
 
-/** ตรวจข้อความไทยที่เพี้ยนจาก ODBC (UTF-8 ถูกตีความเป็น Windows-874) */
+/** ตรวจ UTF-8 ไทยที่ถูกเก็บเป็นทีละไบต์ (เช่น à¸ = E0 B8 99) */
+function looksUtf8BytesAsChars(s) {
+  const str = String(s || '');
+  for (let i = 0; i < str.length - 2; i++) {
+    const a = str.charCodeAt(i);
+    const b = str.charCodeAt(i + 1);
+    const c = str.charCodeAt(i + 2);
+    if (a === 0xe0 && (b === 0xb8 || b === 0xb9) && c >= 0x80 && c <= 0xbf) return true;
+    if (a === 0xc3 && b >= 0x80 && b <= 0xbf) return true;
+  }
+  return false;
+}
+
+/** ตรวจข้อความไทยที่เพี้ยนจาก ODBC (UTF-8 ถูกตีความเป็น Windows-874) หรือ Latin-1 */
 function looksThaiMojibake(s) {
   const str = String(s || '');
   if (!str) return false;
+  if (looksUtf8BytesAsChars(str)) return true;
   const hits = (str.match(/เธ|เน[€]/g) || []).length;
   if (hits >= 2) return true;
   if (/รฉ|โ€/.test(str)) return true;
+  // UTF-8 ถูกอ่านเป็น Latin-1 / Windows-1252 เช่น à¸à¸µà¹
+  if ((str.match(/à¸|à¹|Ã.|Â./g) || []).length >= 1) return true;
+  if (/à[\u0080-\u00BF]/.test(str) && !/[\u0E00-\u0E7F]/.test(str)) return true;
   return false;
 }
 
@@ -54,10 +86,84 @@ function looksBrokenText(s) {
   return looksThaiMojibake(str);
 }
 
+/** แก้ข้อความที่เคยถูก encode ผิด ให้กลับเป็นไทยอ่านได้ */
+function repairMojibakeText(raw) {
+  let s = String(raw == null ? '' : raw);
+  if (!s) return s;
+
+  const decodeLatin1Utf8 = (t) => {
+    try {
+      const bytes = Buffer.alloc(t.length);
+      for (let i = 0; i < t.length; i++) bytes[i] = t.charCodeAt(i) & 0xff;
+      const fixed = bytes.toString('utf8');
+      if (fixed && fixed !== t && !fixed.includes('\uFFFD')) return fixed;
+    } catch (_) {}
+    return null;
+  };
+
+  const score = (t) => {
+    const thai = (String(t).match(/[\u0E00-\u0E7F]/g) || []).length;
+    const bad = (String(t).match(/à[¸¹]|Ã.|Â.|เธ|เน[€]/g) || []).length;
+    const ctrl = (String(t).match(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g) || []).length;
+    return thai * 3 - bad * 2 - ctrl * 20;
+  };
+
+  if (looksThaiMojibake(s) || looksUtf8BytesAsChars(s)) {
+    let cur = s;
+    for (let round = 0; round < 3; round++) {
+      if (!looksThaiMojibake(cur) && !looksUtf8BytesAsChars(cur)) break;
+      const next = decodeLatin1Utf8(cur);
+      if (!next || next === cur) break;
+      if (score(next) <= score(cur)) break;
+      cur = next;
+    }
+    s = cur;
+
+    // ซ่อมชิ้น mojibake ที่ค้างเป็นช่วง ๆ (เช่นชื่อร้านต่อท้ายประโยคไทย)
+    if (looksThaiMojibake(s)) {
+      s = s.replace(/(?:à.|Ã.|Â.)+/g, (chunk) => {
+        const fixed = decodeLatin1Utf8(chunk);
+        if (fixed && /[\u0E00-\u0E7F]/.test(fixed) && score(fixed) > score(chunk)) return fixed;
+        return chunk;
+      });
+    }
+  }
+
+  if (!looksThaiMojibake(s) && !looksUtf8BytesAsChars(s)) return s;
+
+  // UTF-8 bytes ถูกตีเป็น Windows-874
+  try {
+    const iconv = require('iconv-lite');
+    const bytes = [];
+    for (const ch of s) {
+      const cp = ch.codePointAt(0);
+      if (cp <= 0xff) bytes.push(cp);
+      else {
+        const enc = iconv.encode(ch, 'win874');
+        for (const b of enc) bytes.push(b);
+      }
+    }
+    const fixed = Buffer.from(bytes).toString('utf8');
+    if (
+      fixed &&
+      fixed !== s &&
+      !fixed.includes('\uFFFD') &&
+      /[\u0E00-\u0E7F]/.test(fixed) &&
+      score(fixed) > score(s)
+    ) {
+      return fixed;
+    }
+  } catch (_) {}
+
+  return s;
+}
+
 /** เลือกข้อความไทยที่อ่านได้ระหว่างค่า NVARCHAR กับ CONVERT(varchar) */
 function pickThaiText(raw, asAnsi) {
-  const a = raw == null ? '' : String(raw);
-  const b = asAnsi == null ? '' : String(asAnsi);
+  const a0 = raw == null ? '' : String(raw);
+  const b0 = asAnsi == null ? '' : String(asAnsi);
+  const a = repairMojibakeText(a0);
+  const b = repairMojibakeText(b0);
   const aBad = looksBrokenText(a);
   const bBad = !b || looksBrokenText(b);
   if (aBad && !bBad) return b;
@@ -65,15 +171,85 @@ function pickThaiText(raw, asAnsi) {
   return a || b;
 }
 
-const CONN = process.env.DB_CONN_STRING || (
-  'Driver={' + (process.env.ODBC_DRIVER || 'ODBC Driver 17 for SQL Server') + '};Server=' + (process.env.DB_HOST || 'tvsdb2.thanvasupos.com') +
-  ',' + (process.env.DB_PORT || '28914') +
-  ';Database=' + (process.env.DB_NAME || 'BD_CSystem') +
-  ';UID=' + (process.env.DB_USER || 'uinet') +
-  ';PWD=' + (process.env.DB_PASS || '') +
-  ';Encrypt=' + (process.env.DB_ENCRYPT || 'yes') +
-  ';TrustServerCertificate=yes;'
-);
+function buildConnString(driverName) {
+  const driver = String(driverName || process.env.ODBC_DRIVER || 'ODBC Driver 18 for SQL Server')
+    .replace(/^["']|["']$/g, '')
+    .trim();
+  return (
+    'Driver={' + driver + '};Server=' + (process.env.DB_HOST || 'tvsdb2.thanvasupos.com') +
+    ',' + (process.env.DB_PORT || '28914') +
+    ';Database=' + (process.env.DB_NAME || 'BD_CSystem') +
+    ';UID=' + (process.env.DB_USER || 'uinet') +
+    ';PWD=' + (process.env.DB_PASS || '') +
+    ';Encrypt=' + (process.env.DB_ENCRYPT || 'yes') +
+    ';TrustServerCertificate=yes;'
+  );
+}
+
+const CONN = process.env.DB_CONN_STRING || buildConnString();
+
+function connDebugInfo() {
+  return {
+    host: process.env.DB_HOST || 'tvsdb2.thanvasupos.com',
+    port: process.env.DB_PORT || '28914',
+    database: process.env.DB_NAME || 'BD_CSystem',
+    user: process.env.DB_USER || 'uinet',
+    encrypt: process.env.DB_ENCRYPT || 'yes',
+    driver: String(process.env.ODBC_DRIVER || 'ODBC Driver 18 for SQL Server').replace(/^["']|["']$/g, '').trim(),
+    hasPassword: !!(process.env.DB_PASS && String(process.env.DB_PASS).length),
+    hasConnString: !!process.env.DB_CONN_STRING,
+  };
+}
+
+function formatOdbcError(e) {
+  const parts = [];
+  if (e && e.message) parts.push(e.message);
+  const list = (e && e.odbcErrors) || [];
+  list.forEach(x => {
+    if (x && x.message) parts.push(x.message);
+  });
+  return parts.filter(Boolean).join(' | ') || 'ODBC connection failed';
+}
+
+async function connectOdbc() {
+  if (process.env.DB_CONN_STRING) {
+    return odbc.connect({ connectionString: process.env.DB_CONN_STRING });
+  }
+
+  // ใน Docker/Linux มีแค่ Driver 18 — อย่า fallback ไป 17 (จะได้ error หลอกว่า "file not found")
+  const inContainer = process.env.DOCKER === '1'
+    || process.env.NODE_ENV === 'production'
+    || fs.existsSync('/.dockerenv');
+  const preferred = String(process.env.ODBC_DRIVER || 'ODBC Driver 18 for SQL Server')
+    .replace(/^["']|["']$/g, '')
+    .trim();
+  const drivers = inContainer
+    ? [preferred, 'ODBC Driver 18 for SQL Server']
+    : [preferred, 'ODBC Driver 18 for SQL Server', 'ODBC Driver 17 for SQL Server'];
+  const list = drivers
+    .filter(Boolean)
+    .filter((d, i, arr) => arr.indexOf(d) === i);
+
+  const failures = [];
+  for (const driver of list) {
+    try {
+      return await odbc.connect({ connectionString: buildConnString(driver) });
+    } catch (e) {
+      const msg = formatOdbcError(e);
+      failures.push(driver + ' → ' + msg);
+      console.error('[odbc] connect failed with', driver, '→', msg);
+    }
+  }
+  const info = connDebugInfo();
+  const err = new Error(
+    '[odbc] Error connecting to the database — ' +
+    info.host + ':' + info.port + '/' + info.database +
+    ' user=' + info.user +
+    ' hasPassword=' + info.hasPassword +
+    ' | ' + failures.join(' || ')
+  );
+  throw err;
+}
 
 const BUSINESS_TYPES = [
   { en: 'Restaurant', th: 'ร้านอาหาร' },
@@ -110,9 +286,21 @@ function normalizeBusinessType(raw) {
 }
 
 async function withConn(fn) {
-  const cn = await odbc.connect({ connectionString: CONN });
+  const cn = await connectOdbc();
   try { return await fn(cn); }
   finally { try { await cn.close(); } catch (e) {} }
+}
+
+async function pingDb() {
+  const info = connDebugInfo();
+  try {
+    await withConn(async cn => {
+      await cn.query('SELECT 1 AS ok');
+    });
+    return { ok: true, ...info };
+  } catch (e) {
+    return { ok: false, error: formatOdbcError(e), ...info };
+  }
 }
 
 function hashPassword(password) {
@@ -133,21 +321,44 @@ function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(hash, expect);
 }
 
+function isAdminRole(role) {
+  return role === 'Admin' || role === 'SuperAdmin';
+}
+
+function isSuperAdminRole(role) {
+  return role === 'SuperAdmin';
+}
+
+function roleLabelTh(role) {
+  if (role === 'SuperAdmin') return 'Super Admin';
+  if (role === 'Admin') return 'ผู้ดูแลระบบ';
+  return 'ผู้ใช้งาน';
+}
+
 async function ensureAdmin() {
   await ensureUserAuthSchema();
   return withConn(async cn => {
-    const rows = await cn.query("SELECT id, password_hash FROM Users WHERE username = ?", ['admin']);
+    const rows = await cn.query(
+      "SELECT id, password_hash, role FROM Users WHERE username = ?",
+      ['admin']
+    );
     const pw = process.env.ADMIN_PASSWORD || 'admin123';
     if (!rows.length) {
       await cn.query(
         'INSERT INTO Users (username, password_hash, role, email) VALUES (?, ?, ?, ?)',
-        ['admin', hashPassword(pw), 'Admin', process.env.ADMIN_EMAIL || null]
+        ['admin', hashPassword(pw), 'SuperAdmin', process.env.ADMIN_EMAIL || null]
       );
       return { created: true };
     }
     if (!rows[0].password_hash || String(rows[0].password_hash).includes('PLACEHOLDER')) {
       await cn.query('UPDATE Users SET password_hash = ?, updated_at = '+SQL_NOW_TH+' WHERE id = ?',
         [hashPassword(pw), rows[0].id]);
+    }
+    if (String(rows[0].role || '') !== 'SuperAdmin') {
+      await cn.query(
+        "UPDATE Users SET role = N'SuperAdmin', updated_at = "+SQL_NOW_TH+" WHERE id = ?",
+        [rows[0].id]
+      );
     }
     if (process.env.ADMIN_EMAIL) {
       await cn.query('UPDATE Users SET email = ?, updated_at = '+SQL_NOW_TH+' WHERE id = ?',
@@ -329,11 +540,19 @@ async function listUsers() {
   });
 }
 
-async function createUser({ username, password, role, email }, actorId) {
+async function createUser({ username, password, role, email }, actorId, actorRole) {
   await ensureUserAuthSchema();
   const u = String(username || '').trim();
   const pw = String(password || '');
-  const r = role === 'Admin' ? 'Admin' : 'User';
+  const want = String(role || 'User');
+  if (want === 'SuperAdmin') throw new Error('ไม่สามารถสร้างบัญชี Super Admin เพิ่มได้');
+  let r = 'User';
+  if (want === 'Admin') {
+    if (!isSuperAdminRole(actorRole)) {
+      throw new Error('เฉพาะ Super Admin สร้างผู้ดูแลระบบได้');
+    }
+    r = 'Admin';
+  }
   const em = normalizeEmail(email);
   if (!u) throw new Error('กรุณากรอกชื่อผู้ใช้');
   if (u.length < 3) throw new Error('ชื่อผู้ใช้อย่างน้อย 3 ตัวอักษร');
@@ -367,7 +586,7 @@ async function createUser({ username, password, role, email }, actorId) {
       entityType: 'User',
       entityId: user.id,
       action: 'create',
-      summary: 'สร้างผู้ใช้ ' + u + ' (' + (r === 'Admin' ? 'ผู้ดูแลระบบ' : 'ผู้ใช้งาน') + ')',
+      summary: 'สร้างผู้ใช้ ' + u + ' (' + roleLabelTh(r) + ')',
       after: { id: user.id, username: u, role: r, email: em || null },
     });
     return user;
@@ -665,10 +884,17 @@ async function saveMailSettings(input, actorId) {
   return getMailSettingsPublic();
 }
 
-async function setUserActive(id, isActive, actorId) {
+async function setUserActive(id, isActive, actorId, actorRole) {
   return withConn(async cn => {
     const rows = await cn.query('SELECT id, username, role, is_active FROM Users WHERE id = ?', [id]);
     if (!rows.length) return null;
+    const targetRole = String(rows[0].role || '');
+    if (isSuperAdminRole(targetRole)) {
+      throw new Error('ไม่สามารถปิดบัญชี Super Admin ได้');
+    }
+    if (targetRole === 'Admin' && !isSuperAdminRole(actorRole)) {
+      throw new Error('เฉพาะ Super Admin จัดการผู้ดูแลระบบได้');
+    }
     if (Number(rows[0].id) === Number(actorId) && !isActive) {
       throw new Error('ไม่สามารถปิดบัญชีตัวเองได้');
     }
@@ -713,18 +939,44 @@ async function writeAudit({ userId, entityType, entityId, action, summary, befor
 
 async function repairAuditSummaries(cn) {
   const rows = await cn.query(`
-    SELECT id, summary AS rawNvarchar,
-           CONVERT(varchar(500), summary) AS asAnsi
+    SELECT id,
+           summary AS rawNvarchar,
+           CONVERT(varchar(500), summary) AS asAnsi,
+           CAST(before_json AS nvarchar(max)) AS beforeJson,
+           CAST(after_json AS nvarchar(max)) AS afterJson
     FROM AuditLog
-    WHERE summary IS NOT NULL AND summary <> N''
+    WHERE (summary IS NOT NULL AND summary <> N'')
+       OR before_json IS NOT NULL
+       OR after_json IS NOT NULL
   `);
   let fixed = 0;
   for (const r of rows) {
-    const good = pickThaiText(r.rawNvarchar, r.asAnsi);
-    if (good && good !== String(r.rawNvarchar || '') && !looksThaiMojibake(good)) {
-      await cn.query(`UPDATE AuditLog SET summary = ${sqlN(good)} WHERE id = ?`, [r.id]);
-      fixed += 1;
+    const sets = [];
+    const rawSummary = String(r.rawNvarchar || '');
+    const goodSummary = repairMojibakeText(rawSummary);
+    if (
+      goodSummary &&
+      goodSummary !== rawSummary &&
+      !/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/.test(goodSummary) &&
+      (goodSummary.match(/[\u0E00-\u0E7F]/g) || []).length >= (rawSummary.match(/[\u0E00-\u0E7F]/g) || []).length &&
+      !looksUtf8BytesAsChars(goodSummary)
+    ) {
+      sets.push(`summary = ${sqlN(goodSummary)}`);
     }
+    for (const [col, val] of [
+      ['before_json', r.beforeJson],
+      ['after_json', r.afterJson],
+    ]) {
+      const raw = String(val == null ? '' : val);
+      if (!raw || !looksThaiMojibake(raw)) continue;
+      const good = repairMojibakeText(raw);
+      if (!good || good === raw || looksThaiMojibake(good)) continue;
+      if (!/[\u0E00-\u0E7F]/.test(good)) continue;
+      sets.push(`${col} = ${sqlN(good)}`);
+    }
+    if (!sets.length) continue;
+    await cn.query(`UPDATE AuditLog SET ${sets.join(', ')} WHERE id = ?`, [Number(r.id)]);
+    fixed += 1;
   }
   return fixed;
 }
@@ -805,11 +1057,47 @@ async function syncShopNamesFromThanvasuInfo() {
   });
 }
 
-let thaiRepairDone = false;
+let thaiRepairRanVersion = 0;
+const THAI_REPAIR_VERSION = 3; // bump เมื่ออัลกอริทึมซ่อมเปลี่ยน เพื่อรันซ้ำหลังรีสตาร์ท
 async function ensureThaiTextRepaired(cn) {
-  if (thaiRepairDone) return;
-  thaiRepairDone = true;
-  // ไม่ดึง/ซิงก์จาก Database อื่นอัตโนมัติแล้ว — เก็บเฉพาะข้อมูลที่กรอกใน BD_CSystem
+  if (thaiRepairRanVersion >= THAI_REPAIR_VERSION) return;
+  thaiRepairRanVersion = THAI_REPAIR_VERSION;
+  try {
+    const cols = [
+      'name', 'brand_name', 'company_name_th', 'company_name_en',
+      'owner_name', 'owner_nickname', 'contact_name', 'contact_nickname',
+      'contact_other', 'notes', 'system_flow', 'hardware_other',
+      'branch_names', 'website_social',
+    ];
+    const rows = await cn.query(`
+      SELECT id, name, brand_name, company_name_th, company_name_en,
+             owner_name, owner_nickname, contact_name, contact_nickname,
+             contact_other,
+             CAST(notes AS nvarchar(4000)) AS notes,
+             CAST(system_flow AS nvarchar(4000)) AS system_flow,
+             hardware_other,
+             CAST(branch_names AS nvarchar(4000)) AS branch_names,
+             website_social
+      FROM Shops`);
+    for (const r of rows) {
+      const sets = [];
+      for (const col of cols) {
+        const raw = String(r[col] == null ? '' : r[col]);
+        if (!raw || !looksThaiMojibake(raw)) continue;
+        const fixed = col === 'name' ? cleanShopName(raw) : repairMojibakeText(raw);
+        if (!fixed || fixed === raw || looksThaiMojibake(fixed)) continue;
+        if (!/[\u0E00-\u0E7F]/.test(fixed)) continue;
+        sets.push(`${col}=${sqlN(fixed)}`);
+      }
+      if (sets.length) {
+        await cn.query(`UPDATE Shops SET ${sets.join(', ')} WHERE id=?`, [Number(r.id)]);
+      }
+    }
+    const nAudit = await repairAuditSummaries(cn);
+    if (nAudit) console.log('[db] repaired AuditLog rows:', nAudit);
+  } catch (e) {
+    console.warn('ensureThaiTextRepaired', e.message || e);
+  }
 }
 
 async function listCatalog() {
@@ -885,6 +1173,9 @@ async function listShops({ q, businessType, dataSource, hasE, serviceCode, servi
         CAST(s.notes AS nvarchar(4000)) AS notes,
         CONVERT(varchar(400), MAX(CAST(s.notes AS nvarchar(4000)))) AS notes_ansi,
         s.rest_id, s.rest_db,
+        s.brand_name, s.company_name_th, s.company_name_en,
+        s.owner_name, s.contact_name, s.contact_email,
+        s.facebook_url, s.instagram_url, s.contact_line, s.contact_other,
         CONVERT(varchar(30), s.created_at, 126) AS created_at,
         CONVERT(varchar(30), s.updated_at, 126) AS updated_at,
         s.created_by, s.updated_by,
@@ -902,9 +1193,11 @@ async function listShops({ q, businessType, dataSource, hasE, serviceCode, servi
         OR ISNULL(s.brand_name,'') LIKE ? OR ISNULL(s.company_name_th,'') LIKE ?
         OR ISNULL(s.company_name_en,'') LIKE ? OR ISNULL(s.contact_email,'') LIKE ?
         OR ISNULL(s.owner_name,'') LIKE ? OR ISNULL(s.contact_name,'') LIKE ?
+        OR ISNULL(s.facebook_url,'') LIKE ? OR ISNULL(s.instagram_url,'') LIKE ?
+        OR ISNULL(s.contact_line,'') LIKE ? OR ISNULL(s.contact_other,'') LIKE ?
       )`;
       const like = '%' + q + '%';
-      params.push(like, like, like, like, like, like, like, like, like, like);
+      params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like);
     }
     if (businessType) { sql += ' AND s.business_type = ?'; params.push(businessType); }
     if (dataSource) {
@@ -924,7 +1217,12 @@ async function listShops({ q, businessType, dataSource, hasE, serviceCode, servi
       )`;
       params.push(serviceCode, serviceStatus);
     }
-    sql += ' GROUP BY s.id, s.name, s.start_date, s.business_type, s.business_type_other, s.data_source, CAST(s.notes AS nvarchar(4000)), s.rest_id, s.rest_db, s.created_at, s.updated_at, s.created_by, s.updated_by';
+    sql += ` GROUP BY s.id, s.name, s.start_date, s.business_type, s.business_type_other, s.data_source,
+      CAST(s.notes AS nvarchar(4000)), s.rest_id, s.rest_db,
+      s.brand_name, s.company_name_th, s.company_name_en,
+      s.owner_name, s.contact_name, s.contact_email,
+      s.facebook_url, s.instagram_url, s.contact_line, s.contact_other,
+      s.created_at, s.updated_at, s.created_by, s.updated_by`;
     sql += ' ORDER BY s.data_source, s.name';
     const rows = params.length ? await cn.query(sql, params) : await cn.query(sql);
     return rows.map(mapShop);
@@ -968,6 +1266,32 @@ async function getShop(id) {
     shop.serviceSummary = { Y: y, E: e, N: n };
     await profile.seedShopHardware(cn, id);
     shop.hardware = await profile.listShopHardware(cn, id);
+    // คง id สาขาให้เสถียร (ร้านเก่าที่ยังไม่มี id ใน JSON)
+    if (Array.isArray(shop.branches) && shop.branches.length) {
+      const parsed = profile.parseBranches((profileRow && profileRow.branch_names) || '');
+      const beforeIds = parsed.map(b => String(b.id || '').trim()).filter(Boolean);
+      const needPersist = beforeIds.length !== shop.branches.length
+        || shop.branches.some(b => !beforeIds.includes(String(b.id || '')));
+      if (needPersist) {
+        try {
+          await cn.query(
+            `UPDATE Shops SET branch_names=${sqlNOrNull(profile.serializeBranches(shop.branches))} WHERE id = ?`,
+            [id]
+          );
+        } catch (e) {
+          console.warn('persist branch ids', e.message || e);
+        }
+      }
+      await profile.attachHardwareToBranches(cn, id, shop.branches, shop.hardware);
+      const summed = profile.aggregateHardwareFromBranches(shop.branches);
+      if (summed.some(h => Number(h.qty) > 0)) {
+        const byId = new Map(summed.map(h => [Number(h.hardwareId), Number(h.qty || 0)]));
+        shop.hardware = (shop.hardware || []).map(h => ({
+          ...h,
+          qty: byId.has(Number(h.hardwareId)) ? byId.get(Number(h.hardwareId)) : Number(h.qty || 0),
+        }));
+      }
+    }
     shop.images = await profile.listShopImages(cn, id);
     return shop;
   });
@@ -1035,7 +1359,7 @@ async function createShop(data, userId) {
         );
       }
     }
-    if (p.hardware.length) await profile.saveShopHardware(cn, id, p.hardware);
+    await profile.saveShopBranchHardware(cn, id, p.branches || []);
     const shop = await getShop(id);
     await writeAudit({
       userId, entityType: 'Shop', entityId: id, action: 'create',
@@ -1099,9 +1423,7 @@ async function updateShop(id, data, userId) {
         }
       }
     }
-    if (Array.isArray(data.hardware)) {
-      await profile.saveShopHardware(cn, id, data.hardware);
-    }
+    await profile.saveShopBranchHardware(cn, id, p.branches || []);
     const after = await getShop(id);
     await writeAudit({
       userId, entityType: 'Shop', entityId: id, action: 'update',
@@ -1166,17 +1488,234 @@ async function getMediaFile(imageId) {
     const rec = await profile.getImageRecord(cn, imageId);
     if (!rec) return null;
     const fp = profile.absoluteImagePath(rec);
-    if (!fs.existsSync(fp)) return null;
-    return {
-      path: fp,
+    const meta = {
       mime: rec.mime || 'application/octet-stream',
       originalName: rec.originalName || rec.storedName,
       sizeBytes: rec.sizeBytes,
     };
+
+    // 1) แคชดิสก์ก่อน — เร็ว และกันหน้าฟอร์มหมดเวลารอตอนอ่าน VARBINARY จาก DB
+    if (fs.existsSync(fp)) {
+      try {
+        const buf = fs.readFileSync(fp);
+        if (buf && buf.length) {
+          return Object.assign({ buffer: buf, path: fp }, meta, { sizeBytes: meta.sizeBytes || buf.length });
+        }
+      } catch (_) {}
+    }
+
+    // 2) อ่านจาก DB (แหล่งจริง)
+    let buf = await profile.readImageBlob(cn, imageId);
+    if (!buf || !buf.length) return null;
+
+    // 3) เขียนแคชดิสก์ best-effort
+    try {
+      const dir = path.dirname(fp);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(fp, buf);
+    } catch (_) {}
+
+    return Object.assign({ buffer: buf, path: fs.existsSync(fp) ? fp : null }, meta, {
+      sizeBytes: meta.sizeBytes || buf.length,
+    });
   });
 }
 
-async function reportSummary() {
+async function brandBranchOverview({ businessType } = {}) {
+  return withConn(async cn => {
+    await ensureShopExtraColumns(cn);
+    let sql = `
+      SELECT id,
+        name,
+        brand_name, business_type, business_type_other,
+        branch_count,
+        CAST(branch_names AS nvarchar(4000)) AS branch_names,
+        CONVERT(varchar(30), updated_at, 126) AS updated_at
+      FROM Shops
+      WHERE 1=1`;
+    const params = [];
+    const btFilter = String(businessType || '').trim();
+    if (btFilter) {
+      sql += ' AND business_type = ?';
+      params.push(btFilter);
+    }
+    const rows = await cn.query(sql, params);
+
+    const brandMap = new Map();
+    const typeBrandSet = new Map();
+    const typeBranchSum = new Map();
+    let lastUpdated = null;
+
+    for (const r of rows) {
+      const shopName = cleanShopName(r.name) || String(r.name || '').trim();
+      const brandName = cleanShopName(r.brand_name) || shopName || '(ไม่ระบุ)';
+      const key = brandName.toLowerCase();
+      // รายชื่อสาขา = ความจริง; ถ้ายังไม่มีชื่อค่อยใช้ตัวเลขที่กรอก
+      const branchNames = profile.parseBranchNames(r.branch_names);
+      const listed = branchNames.filter(Boolean).length;
+      let declared = r.branch_count != null ? Number(r.branch_count) : 0;
+      if (!Number.isFinite(declared) || declared < 0) declared = 0;
+      const bc = listed > 0 ? listed : (declared > 0 ? declared : 1);
+      const typeKey = r.business_type
+        ? (normalizeBusinessType(r.business_type) || String(r.business_type).trim() || '(ไม่ระบุ)')
+        : '(ไม่ระบุ)';
+
+      if (!typeBrandSet.has(typeKey)) typeBrandSet.set(typeKey, new Set());
+      typeBrandSet.get(typeKey).add(key);
+      typeBranchSum.set(typeKey, (typeBranchSum.get(typeKey) || 0) + bc);
+
+      const prev = brandMap.get(key);
+      const shopIdNum = Number(r.id);
+      if (!prev) {
+        brandMap.set(key, {
+          brandName,
+          shopName,
+          businessType: typeKey,
+          branches: bc,
+          shopCount: 1,
+          shopId: shopIdNum,
+          shopIds: [shopIdNum],
+          updatedAt: r.updated_at || null,
+          _maxShopBranches: bc,
+        });
+      } else {
+        prev.branches += bc;
+        prev.shopCount += 1;
+        prev.shopIds.push(shopIdNum);
+        if (bc >= (prev._maxShopBranches || 0)) {
+          prev.businessType = typeKey;
+          prev.shopId = shopIdNum;
+          prev.shopName = shopName;
+          prev._maxShopBranches = bc;
+        }
+        if (r.updated_at && (!prev.updatedAt || String(r.updated_at) > String(prev.updatedAt))) {
+          prev.updatedAt = r.updated_at;
+        }
+      }
+
+      if (r.updated_at && (!lastUpdated || String(r.updated_at) > String(lastUpdated))) {
+        lastUpdated = r.updated_at;
+      }
+    }
+
+    const brands = [...brandMap.values()].map(b => {
+      delete b._maxShopBranches;
+      return b;
+    });
+    brands.sort((a, b) => b.branches - a.branches || a.brandName.localeCompare(b.brandName, 'th'));
+
+    const top10 = brands.slice(0, 10);
+    const logoByShop = new Map();
+    if (top10.length) {
+      const ids = [...new Set(
+        top10.flatMap(b => (b.shopIds && b.shopIds.length ? b.shopIds : [b.shopId]))
+          .map(id => Number(id))
+          .filter(id => Number.isFinite(id) && id > 0)
+      )];
+      if (ids.length) {
+        const ph = ids.map(() => '?').join(',');
+        const logos = await cn.query(
+          `SELECT shop_id, id
+           FROM ShopImages
+           WHERE LOWER(CAST(kind AS nvarchar(20))) = N'logo' AND shop_id IN (${ph})
+           ORDER BY shop_id, sort_order, id`,
+          ids
+        );
+        for (const L of logos) {
+          const sid = Number(L.shop_id != null ? L.shop_id : L.shopId);
+          const iid = Number(L.id);
+          if (!Number.isFinite(sid) || !Number.isFinite(iid)) continue;
+          if (logoByShop.has(sid)) continue;
+          const rec = await profile.getImageRecord(cn, iid);
+          if (!rec) continue;
+          let ok = false;
+          const blob = await profile.readImageBlob(cn, iid);
+          if (blob && blob.length) ok = true;
+          else {
+            const fp = profile.absoluteImagePath(rec);
+            if (fs.existsSync(fp)) {
+              try {
+                await profile.saveImageBlob(cn, iid, fs.readFileSync(fp));
+                ok = true;
+              } catch (_) {}
+            }
+          }
+          if (!ok) continue;
+          logoByShop.set(sid, iid);
+        }
+      }
+    }
+
+    // ถ้าตัวแทนยังไม่มีโลโก้ ให้ใช้โลโก้จากร้านอื่นใน brand เดียวกัน
+    for (const b of top10) {
+      const sid = Number(b.shopId);
+      if (logoByShop.has(sid)) continue;
+      const alts = (b.shopIds || []).map(Number);
+      const hit = alts.find(id => logoByShop.has(id));
+      if (hit) b.shopId = hit;
+    }
+
+    const brandsByType = [...typeBrandSet.entries()]
+      .map(([businessType, set]) => ({ businessType, count: set.size }))
+      .sort((a, b) => b.count - a.count || a.businessType.localeCompare(b.businessType, 'en'));
+    const branchesByType = [...typeBranchSum.entries()]
+      .map(([businessType, count]) => ({ businessType, count }))
+      .sort((a, b) => b.count - a.count || a.businessType.localeCompare(b.businessType, 'en'));
+
+    return {
+      totalBrands: brands.length,
+      totalBranches: brands.reduce((n, b) => n + b.branches, 0),
+      totalShops: rows.length,
+      totalBusinessTypes: typeBrandSet.size,
+      brandsByType,
+      branchesByType,
+      topBrands: top10.map((b, i) => {
+        const shopId = Number(b.shopId);
+        const logoId = logoByShop.get(shopId) || null;
+        return {
+          rank: i + 1,
+          brandName: b.brandName,
+          shopName: b.shopName,
+          shopCount: b.shopCount,
+          businessType: b.businessType,
+          branches: b.branches,
+          shopId: Number.isFinite(shopId) ? shopId : null,
+          logoUrl: logoId ? ('/api/media/' + logoId) : null,
+        };
+      }),
+      lastUpdated,
+      filterBusinessType: btFilter || '',
+    };
+  });
+}
+
+function reportShopWhere(opts = {}) {
+  const parts = ['1=1'];
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(String(opts.from || '')) ? String(opts.from) : '';
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(String(opts.to || '')) ? String(opts.to) : '';
+  const btRaw = String(opts.businessType || '').trim();
+  const bt = btRaw ? (normalizeBusinessType(btRaw) || btRaw) : '';
+  if (from) parts.push(`s.start_date >= '${from}'`);
+  if (to) parts.push(`s.start_date <= '${to}'`);
+  if (bt) {
+    if (bt === 'Cafe / Coffee Shop') {
+      parts.push(`(
+        s.business_type = ${sqlN(bt)}
+        OR (s.business_type LIKE N'Caf%' AND s.business_type LIKE N'%Coffee Shop%')
+      )`);
+    } else {
+      parts.push(`s.business_type = ${sqlN(bt)}`);
+    }
+  }
+  return {
+    sql: parts.join(' AND '),
+    from,
+    to,
+    businessType: bt,
+  };
+}
+
+async function reportSummary(opts = {}) {
   return withConn(async cn => {
     await ensureThaiTextRepaired(cn);
     await cn.query(`
@@ -1187,8 +1726,14 @@ async function reportSummary() {
         AND business_type LIKE N'%Coffee Shop%'
         AND business_type <> N'Cafe / Coffee Shop'
     `);
+    const filter = reportShopWhere(opts);
+    const shopWhere = filter.sql;
     const byTypeRaw = await cn.query(
-      `SELECT ISNULL(business_type, N'(ไม่ระบุ)') AS businessType, COUNT(*) AS cnt FROM Shops GROUP BY business_type ORDER BY cnt DESC`
+      `SELECT ISNULL(s.business_type, N'(ไม่ระบุ)') AS businessType, COUNT(*) AS cnt
+       FROM Shops s
+       WHERE ${shopWhere}
+       GROUP BY s.business_type
+       ORDER BY cnt DESC`
     );
     const byTypeMap = new Map();
     for (const r of byTypeRaw) {
@@ -1207,6 +1752,10 @@ async function reportSummary() {
          SUM(CASE WHEN ss.status='N' THEN 1 ELSE 0 END) AS n
        FROM ServiceCatalog c
        LEFT JOIN ShopServices ss ON ss.service_id = c.id
+         AND EXISTS (
+           SELECT 1 FROM Shops s
+           WHERE s.id = ss.shop_id AND ${shopWhere}
+         )
        GROUP BY c.id, c.name, c.code, c.sort_order
        ORDER BY c.sort_order`
     );
@@ -1217,7 +1766,7 @@ async function reportSummary() {
               s.business_type AS businessType
        FROM Shops s
        JOIN ShopServices ss ON ss.shop_id = s.id
-       WHERE ss.status = 'E'
+       WHERE ss.status = 'E' AND ${shopWhere}
        ORDER BY s.name`
     );
     return {
@@ -1234,6 +1783,11 @@ async function reportSummary() {
         name: cleanShopName(pickThaiText(r.name_raw, r.name_ansi)),
         businessType: normalizeBusinessType(r.businessType || ''),
       })),
+      filters: {
+        from: filter.from || '',
+        to: filter.to || '',
+        businessType: filter.businessType || '',
+      },
     };
   });
 }
@@ -1438,6 +1992,14 @@ async function ensureShopExtraColumns(cn) {
     await cn.query(`ALTER TABLE dbo.Shops ADD rest_db NVARCHAR(200) NULL`);
   }
   await profile.ensureProfileSchema(cn);
+  if (!ensureShopExtraColumns._imgMigrated) {
+    ensureShopExtraColumns._imgMigrated = true;
+    try {
+      await profile.migrateDiskImagesIntoDb(cn);
+    } catch (e) {
+      console.warn('[uploads] migrate on boot', e.message || e);
+    }
+  }
 }
 
 function remoteConn(server, database) {
@@ -1485,9 +2047,11 @@ function normalizeServerName(raw) {
 
 /** ชื่อร้านที่อ่านง่าย — ตัด NBSP / ตัวอักษรเพี้ยน / ช่องว่างเกิน */
 function cleanShopName(raw) {
-  let s = String(raw == null ? '' : raw);
+  let s = repairMojibakeText(String(raw == null ? '' : raw));
   s = s.replace(/\u00A0/g, ' ');
   s = s.replace(/[\u200B\uFEFF]/g, '');
+  // น + ํ + ็ + า → น้ำ (สระเรียงผิดจาก input/encoding)
+  s = s.replace(/\u0E19\u0E4D\u0E47\u0E32/g, 'น้ำ');
   // ย คั่นกลางที่เพี้ยนจาก NBSP ระหว่างคำอังกฤษ / รหัสสาขา
   s = s.replace(/([A-Za-z0-9])\s*ย\s+([A-Za-z0-9])/g, '$1 $2');
   s = s.replace(/\s*ย\s+(?=S\d)/gi, ' ');
@@ -1878,7 +2442,7 @@ async function importFromThanvasuInfo() {
 }
 
 module.exports = {
-  CONN, BUSINESS_TYPES,
+  CONN, BUSINESS_TYPES, pingDb, connDebugInfo,
   hashPassword, verifyPassword, ensureAdmin, ensureUserAuthSchema,
   findUserByUsername, findUserById, findUserByEmail, listUsers, createUser, setUserActive, setUserEmail,
   createPasswordResetToken, getPasswordResetToken, resetPasswordWithToken, changePassword,
@@ -1886,8 +2450,9 @@ module.exports = {
   logLogin, writeAudit,
   listCatalog, listShops, listDataSources, getShop, createShop, updateShop, deleteShop,
   listHardwareMeta, addShopImage, deleteShopImage, getMediaFile,
-  reportSummary, getExportBundle, listLoginLogs, listAuditLogs, importFromThanvasuInfo, ensureShopExtraColumns,
+  reportSummary, brandBranchOverview, getExportBundle, listLoginLogs, listAuditLogs, importFromThanvasuInfo, ensureShopExtraColumns,
   normalizeServerName, isValidServerName, normalizeShopServers, cleanShopName, compareServers,
   alwaysShowServers, isHostInventoryServer, listHostDatabases, syncHostDatabaseShops,
   syncShopNamesFromThanvasuInfo, normalizeBusinessType, pickThaiText, sqlN,
+  isAdminRole, isSuperAdminRole, roleLabelTh,
 };
