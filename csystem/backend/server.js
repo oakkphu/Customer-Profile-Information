@@ -143,6 +143,20 @@ setInterval(() => {
   for (const [t, s] of sessions) if (now > s.exp) sessions.delete(t);
 }, 10 * 60 * 1000).unref();
 
+function shopRequiredError(body) {
+  if (!String(body.name || '').trim()) return 'กรุณากรอกชื่อร้าน';
+  if (!String(body.brandName || '').trim()) return 'กรุณากรอก Brand Name';
+  if (!String(body.businessType || '').trim()) return 'กรุณาเลือกประเภทธุรกิจ';
+  if (String(body.businessType || '').trim() === 'Other' && !String(body.businessTypeOther || '').trim()) {
+    return 'กรุณาระบุประเภทธุรกิจอื่น ๆ';
+  }
+  if (!String(body.startDate || '').trim()) return 'กรุณากรอกวันเริ่มใช้ระบบ';
+  if (body.branchCount == null || body.branchCount === '') return 'กรุณากรอกจำนวนสาขา';
+  const n = Number(body.branchCount);
+  if (!Number.isFinite(n) || n < 1) return 'จำนวนสาขาต้องอย่างน้อย 1';
+  return null;
+}
+
 function shopBodyFromJson(body) {
   return {
     name: String(body.name || '').trim(),
@@ -172,6 +186,10 @@ function shopBodyFromJson(body) {
     contactOther: body.contactOther || '',
     systemFlow: body.systemFlow || '',
     hardwareOther: body.hardwareOther || '',
+    yearlyCloudPos: body.yearlyCloudPos,
+    yearlyCloudCrm: body.yearlyCloudCrm,
+    yearlyCloudHq: body.yearlyCloudHq,
+    yearlyCloudMonth: body.yearlyCloudMonth,
     hardware: body.hardware || [],
     services: body.services || [],
   };
@@ -297,8 +315,8 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/shops' && req.method === 'POST') {
       const s = requireAuth(req, res); if (!s) return;
       const body = JSON.parse((await readBody(req, 20 * 1024 * 1024)).toString('utf8') || '{}');
-      if (!String(body.name || '').trim()) { json(res, 400, { error: 'กรุณากรอกชื่อร้าน' }); return; }
-      if (!String(body.startDate || '').trim()) { json(res, 400, { error: 'กรุณากรอกวันเริ่มใช้ระบบ' }); return; }
+      const need = shopRequiredError(body);
+      if (need) { json(res, 400, { error: need }); return; }
       try {
         const shop = await store.createShop(shopBodyFromJson(body), s.userId);
         json(res, 201, { shop });
@@ -373,8 +391,8 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'PUT') {
         const s = requireAuth(req, res); if (!s) return;
         const body = JSON.parse((await readBody(req, 20 * 1024 * 1024)).toString('utf8') || '{}');
-        if (!String(body.name || '').trim()) { json(res, 400, { error: 'กรุณากรอกชื่อร้าน' }); return; }
-        if (!String(body.startDate || '').trim()) { json(res, 400, { error: 'กรุณากรอกวันเริ่มใช้ระบบ' }); return; }
+        const need = shopRequiredError(body);
+        if (need) { json(res, 400, { error: need }); return; }
         try {
           const shop = await store.updateShop(id, shopBodyFromJson(body), s.userId);
           if (!shop) { json(res, 404, { error: 'ไม่พบร้าน' }); return; }
@@ -436,6 +454,38 @@ const server = http.createServer(async (req, res) => {
         send(res, 200, buf, {
           'Content-Type': exp.CONTENT_TYPE || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
           'Content-Disposition': 'attachment; filename="' + filename + '"',
+          'Content-Length': String(buf.length),
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'X-Export-Source': 'BD_CSystem',
+        });
+      } catch (e) {
+        console.error(e);
+        json(res, 500, { error: e.message || 'สร้างไฟล์ Excel ไม่สำเร็จ' });
+      }
+      return;
+    }
+
+    if (p === '/api/sales' && req.method === 'GET') {
+      if (!requireAdmin(req, res)) return;
+      try {
+        json(res, 200, await store.salesReport());
+      } catch (e) {
+        console.error(e);
+        json(res, 500, { error: e.message || 'ดึงข้อมูลยอดขายไม่สำเร็จ' });
+      }
+      return;
+    }
+
+    if (p === '/api/sales/export.xlsx' && req.method === 'GET') {
+      if (!requireAdmin(req, res)) return;
+      try {
+        const exp = require('./export-excel');
+        const buf = await exp.exportSalesExcelBuffer();
+        const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        send(res, 200, buf, {
+          'Content-Type': exp.CONTENT_TYPE,
+          'Content-Disposition': 'attachment; filename="CS-Sales-Report-' + stamp + '.xlsx"',
           'Content-Length': String(buf.length),
           'Cache-Control': 'no-store',
           'X-Content-Type-Options': 'nosniff',

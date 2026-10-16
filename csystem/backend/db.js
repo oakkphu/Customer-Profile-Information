@@ -1128,7 +1128,8 @@ const SHOP_PROFILE_COLS = `
   contact_name, contact_nickname, contact_phone, contact_email,
   contact_line, contact_other,
   CONVERT(nvarchar(4000), system_flow) AS system_flow,
-  hardware_other`;
+  hardware_other,
+  yearly_cloud_pos, yearly_cloud_crm, yearly_cloud_hq, yearly_cloud_month`;
 
 function mapShop(r) {
   return Object.assign({
@@ -1323,7 +1324,9 @@ async function createShop(data, userId) {
          owner_name, owner_nickname, owner_phone,
          contact_name, contact_nickname, contact_phone, contact_email,
          contact_line, contact_other,
-         system_flow, hardware_other, created_by, updated_by
+         system_flow, hardware_other,
+         yearly_cloud_pos, yearly_cloud_crm, yearly_cloud_hq, yearly_cloud_month,
+         created_by, updated_by
        )
        OUTPUT INSERTED.id AS id
        VALUES (
@@ -1335,6 +1338,7 @@ async function createShop(data, userId) {
          ${sqlNOrNull(p.contactName)}, ${sqlNOrNull(p.contactNickname)}, ${sqlNOrNull(p.contactPhone)},
          ${sqlNOrNull(p.contactEmail)}, ${sqlNOrNull(p.contactLine)}, ${sqlNOrNull(p.contactOther)},
          ${sqlNOrNull(p.systemFlow)}, ${sqlNOrNull(p.hardwareOther)},
+         ?, ?, ?, ?,
          ?, ?
        )`,
       [
@@ -1343,6 +1347,10 @@ async function createShop(data, userId) {
         data.businessTypeOther || null,
         normalizeServerName(data.dataSource) || null,
         p.branchCount,
+        p.yearlyCloudPos,
+        p.yearlyCloudCrm,
+        p.yearlyCloudHq,
+        p.yearlyCloudMonth,
         userId || null,
         userId || null,
       ]
@@ -1397,11 +1405,16 @@ async function updateShop(id, data, userId) {
         contact_other=${sqlNOrNull(p.contactOther)},
         system_flow=${sqlNOrNull(p.systemFlow)},
         hardware_other=${sqlNOrNull(p.hardwareOther)},
+        yearly_cloud_pos=?, yearly_cloud_crm=?, yearly_cloud_hq=?, yearly_cloud_month=?,
         updated_at=${SQL_NOW_TH}, updated_by=? WHERE id=?`,
       [
         data.startDate || null, normalizeBusinessType(data.businessType) || null, data.businessTypeOther || null,
         normalizeServerName(data.dataSource) || null,
         p.branchCount,
+        p.yearlyCloudPos,
+        p.yearlyCloudCrm,
+        p.yearlyCloudHq,
+        p.yearlyCloudMonth,
         userId || null, id,
       ]
     );
@@ -1788,6 +1801,128 @@ async function reportSummary(opts = {}) {
         to: filter.to || '',
         businessType: filter.businessType || '',
       },
+    };
+  });
+}
+
+const TH_MONTHS_SHORT = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+const TH_MONTHS_FULL = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน',
+  'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+
+function round2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+function moneyAmountOf(v) {
+  const n = Number(String(v == null ? '' : v).replace(/[^\d.-]/g, ''));
+  return Number.isFinite(n) && n > 0 ? round2(n) : 0;
+}
+
+const hasLatinLetters = v => /[A-Za-z]/.test(String(v || ''));
+
+/**
+ * ชื่อที่ใช้โชว์ในตาราง/รายงาน — เน้น “ชื่อภาษาอังกฤษ” ที่กรอกใน database:
+ * brand_name (อังกฤษ) → company_name_en (อังกฤษ) → brand_name → ชื่อร้าน
+ */
+function shopDisplayNameOf(brandName, companyNameEn, name) {
+  const b = String(brandName || '').trim();
+  const e = String(companyNameEn || '').trim();
+  if (hasLatinLetters(b)) return b;
+  if (hasLatinLetters(e)) return e;
+  return b || String(name || '').trim();
+}
+
+/**
+ * รายงานยอดขายรายปี — KPI Total Yearly Cloud MA + ตารางเดือน(1-12) / แบรนด์ / รวม / POS / CRM / HQ
+ * ที่มาของ “เดือน” คือ yearly_cloud_month (เดือนที่ต้องเก็บค่า Yearly Cloud / MA)
+ */
+async function salesReport() {
+  return withConn(async cn => {
+    await ensureShopExtraColumns(cn);
+    const rows = await cn.query(`
+      SELECT s.id,
+        s.name AS name_raw,
+        MAX(CONVERT(varchar(400), s.name)) AS name_ansi,
+        CONVERT(varchar(10), s.start_date, 23) AS start_date,
+        s.brand_name,
+        s.company_name_th,
+        s.company_name_en,
+        s.yearly_cloud_pos AS pos,
+        s.yearly_cloud_crm AS crm,
+        s.yearly_cloud_hq AS hq,
+        s.yearly_cloud_month AS bill_month
+      FROM Shops s
+      GROUP BY s.id, s.name, s.start_date, s.brand_name,
+        s.company_name_th, s.company_name_en,
+        s.yearly_cloud_pos, s.yearly_cloud_crm, s.yearly_cloud_hq, s.yearly_cloud_month`);
+
+    const items = rows.map(r => {
+      const pos = moneyAmountOf(r.pos);
+      const crm = moneyAmountOf(r.crm);
+      const hq = moneyAmountOf(r.hq);
+      const iso = r.start_date ? String(r.start_date).slice(0, 10) : '';
+      const billed = Number(r.bill_month);
+      const m = (Number.isFinite(billed) && billed >= 1 && billed <= 12) ? Math.floor(billed) : 0;
+      const shopName = cleanShopName(pickThaiText(r.name_raw, r.name_ansi));
+      // ชื่อที่โชว์ในตาราง = ชื่อภาษาอังกฤษที่กรอกใน DB (brand_name → company_name_en) ถ้าไม่มีค่อยตกไปใช้ชื่อร้าน
+      const brand = shopDisplayNameOf(r.brand_name, r.company_name_en, shopName);
+      return {
+        id: Number(r.id),
+        brand,
+        shopName,
+        startDate: iso,
+        year: /^\d{4}/.test(iso) ? Number(iso.slice(0, 4)) : null,
+        month: m,
+        monthLabel: m ? TH_MONTHS_SHORT[m - 1] : '',
+        monthFull: m ? TH_MONTHS_FULL[m - 1] : '',
+        pos, crm, hq,
+        total: round2(pos + crm + hq),
+      };
+    });
+
+    const tally = list => list.reduce((a, x) => ({
+      pos: round2(a.pos + x.pos),
+      crm: round2(a.crm + x.crm),
+      hq: round2(a.hq + x.hq),
+      total: round2(a.total + x.total),
+    }), { pos: 0, crm: 0, hq: 0, total: 0 });
+
+    const byBrand = (a, b) => String(a.brand || '').localeCompare(String(b.brand || ''), 'th');
+    const all = items.slice().sort((a, b) => (a.month - b.month) || byBrand(a, b));
+
+    const months = [];
+    for (let m = 1; m <= 12; m++) {
+      const list = items.filter(x => x.month === m).sort(byBrand);
+      months.push(Object.assign({
+        month: m,
+        label: TH_MONTHS_SHORT[m - 1],
+        full: TH_MONTHS_FULL[m - 1],
+        count: list.length,
+        rows: list,
+      }, tally(list)));
+    }
+    const noDate = items.filter(x => !x.month).sort(byBrand);
+    const missing = Object.assign({
+      month: 0,
+      label: 'ไม่ระบุ',
+      full: 'ยังไม่เลือกเดือนที่ต้องเก็บ',
+      count: noDate.length,
+      rows: noDate,
+    }, tally(noDate));
+
+    const kpi = tally(items);
+    const monthsWithMa = months.filter(x => x.total > 0);
+    return {
+      kpi: Object.assign({}, kpi, {
+        shopCount: items.length,
+        withDataCount: items.filter(x => x.total > 0).length,
+        monthCount: monthsWithMa.length,
+        monthLabels: monthsWithMa.map(x => x.label),
+      }),
+      months,
+      missing,
+      rows: all,
+      monthLabels: TH_MONTHS_SHORT.slice(),
     };
   });
 }
@@ -2451,6 +2586,7 @@ module.exports = {
   listCatalog, listShops, listDataSources, getShop, createShop, updateShop, deleteShop,
   listHardwareMeta, addShopImage, deleteShopImage, getMediaFile,
   reportSummary, brandBranchOverview, getExportBundle, listLoginLogs, listAuditLogs, importFromThanvasuInfo, ensureShopExtraColumns,
+  salesReport,
   normalizeServerName, isValidServerName, normalizeShopServers, cleanShopName, compareServers,
   alwaysShowServers, isHostInventoryServer, listHostDatabases, syncHostDatabaseShops,
   syncShopNamesFromThanvasuInfo, normalizeBusinessType, pickThaiText, sqlN,

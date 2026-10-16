@@ -377,8 +377,44 @@ async function exportShopsExcelBuffer() {
   return Buffer.isBuffer(out) ? out : Buffer.from(out);
 }
 
+/** รายงานยอดขาย — KPI Total Yearly Cloud MA + ตารางเดือน/แบรนด์/POS/CRM/HQ */
+async function exportSalesExcelBuffer() {
+  const data = await store.salesReport();
+  const wb = new ExcelJS.Workbook();
+  wb.creator = 'CS System';
+  wb.created = new Date();
+
+  const kpiSheet = addDataSheet(wb, 'Total Yearly Cloud MA', ['รายการ', 'มูลค่า (THB)'], [
+    ['Total Yearly Cloud MA', data.kpi.total],
+    ['Yearly Cloud / MA (POS)', data.kpi.pos],
+    ['Yearly Cloud / MA (CRM)', data.kpi.crm],
+    ['Yearly Cloud / MA (HQ)', data.kpi.hq],
+    ['จำนวนร้านทั้งหมด', data.kpi.shopCount],
+    ['ร้านที่มียอด', data.kpi.withDataCount],
+    ['เดือนที่มีข้อมูล', data.kpi.monthCount],
+  ]);
+  kpiSheet.getRow(2).eachCell(c => { c.font = { bold: true, size: 14 }; });
+
+  const detail = (data.rows || []).map(r => [
+    r.monthLabel || 'ไม่ระบุ', r.brand || '', r.total, r.pos, r.crm, r.hq,
+  ]);
+  detail.push(['รวมทั้งหมด', '', data.kpi.total, data.kpi.pos, data.kpi.crm, data.kpi.hq]);
+  const ws = addDataSheet(wb, 'ยอดรายปี', [
+    'เดือน', 'แบรนด์ / ร้าน', 'รวม (Total)', 'Yearly POS', 'Yearly CRM', 'Yearly HQ',
+  ], detail);
+  const totalRow = ws.getRow(detail.length + 1);
+  totalRow.eachCell(c => {
+    c.font = { bold: true };
+    c.fill = SOFT;
+  });
+
+  const out = await wb.xlsx.writeBuffer({ useStyles: true, useSharedStrings: true });
+  return Buffer.isBuffer(out) ? out : Buffer.from(out);
+}
+
 module.exports = {
   exportShopsExcelBuffer,
+  exportSalesExcelBuffer,
   CONTENT_TYPE: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   FILE_EXT: 'xlsx',
 };

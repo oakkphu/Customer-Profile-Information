@@ -265,6 +265,16 @@ const TH_MONTHS = [
   { v: '07', t: 'ก.ค.' }, { v: '08', t: 'ส.ค.' }, { v: '09', t: 'ก.ย.' },
   { v: '10', t: 'ต.ค.' }, { v: '11', t: 'พ.ย.' }, { v: '12', t: 'ธ.ค.' },
 ];
+const TH_MONTHS_FULL = [
+  'มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน',
+  'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม',
+];
+
+function maMonthLabel(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 1 || n > 12) return '—';
+  return TH_MONTHS_FULL[n - 1];
+}
 
 function daysInMonth(year, month) {
   const y = Number(year);
@@ -481,6 +491,69 @@ function bindDateEasy() {
   });
 }
 
+/** ช่องค่าบริการรายปี (Yearly Cloud / MA) — จำนวนเงินบาท ไม่ติดลบ ใส่ทศนิยมได้ 2 ตำแหน่ง */
+function parseMoneyDigits(raw) {
+  const t = String(raw == null ? '' : raw).trim();
+  if (!t || t.startsWith('-')) return '';
+  const cleaned = t.replace(/[^\d.]/g, '');
+  if (!cleaned) return '';
+  const parts = cleaned.split('.');
+  const intPart = (parts[0] || '').replace(/\D/g, '');
+  const frac = parts.length > 1 ? parts.slice(1).join('').replace(/\D/g, '').slice(0, 2) : '';
+  if (!intPart && !frac) return '';
+  if (parts.length > 1) return (intPart || '0') + '.' + frac;
+  return intPart;
+}
+
+function formatMoneyInput(v) {
+  const s = parseMoneyDigits(v);
+  if (!s) return '';
+  const n = Number(s);
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (s.includes('.') && !Number.isInteger(n)) {
+    return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  return Math.round(n).toLocaleString('en-US');
+}
+
+function moneyPreviewText(raw) {
+  const s = parseMoneyDigits(raw);
+  const n = Number(s);
+  if (!s || !Number.isFinite(n) || n < 0) return 'X,XXX THB.';
+  return formatMoneyInput(s) + ' THB.';
+}
+
+function formatThbDisplay(v) {
+  const s = parseMoneyDigits(v);
+  const n = Number(s);
+  if (!s || !Number.isFinite(n) || n < 0) return '—';
+  return formatMoneyInput(s) + ' THB.';
+}
+
+function readMaAmount(id) {
+  const inp = $('#' + id);
+  if (!inp) return '';
+  const s = parseMoneyDigits(inp.value);
+  if (!s) return '';
+  const n = Number(s);
+  return Number.isFinite(n) && n >= 0 ? n : '';
+}
+
+function bindMoneyAmounts() {
+  $$('.ma-amount').forEach(inp => {
+    const hint = $(`.ma-preview[data-preview="${inp.id}"]`);
+    const sync = (fmt) => {
+      let next = parseMoneyDigits(inp.value);
+      if (fmt && next) next = formatMoneyInput(next);
+      if (next !== inp.value) inp.value = next;
+      if (hint) hint.textContent = moneyPreviewText(inp.value);
+    };
+    inp.addEventListener('input', () => sync(false));
+    inp.addEventListener('blur', () => sync(true));
+    sync(true);
+  });
+}
+
 function pullFormIntoDraft() {
   const d = state.draft;
   if (!d || !$('#fName')) return;
@@ -520,6 +593,10 @@ function pullFormIntoDraft() {
   d.notes = ($('#fNotes') || {}).value || '';
   d.systemFlow = ($('#fFlow') || {}).value || '';
   d.hardwareOther = ($('#fHwOther') || {}).value || '';
+  d.yearlyCloudPos = ($('#fMaPos') || {}).value || '';
+  d.yearlyCloudCrm = ($('#fMaCrm') || {}).value || '';
+  d.yearlyCloudHq = ($('#fMaHq') || {}).value || '';
+  d.yearlyCloudMonth = ($('#fMaMonth') || {}).value || '';
   d.hardware = aggregateHardwareFromBranches(d.branches);
   const svc = collectServicesFromForm();
   const svcMap = new Map(svc.map(s => [Number(s.serviceId), s]));
@@ -546,6 +623,7 @@ function navActive() {
   if (h === '#new' || h.startsWith('#edit/')) return 'new';
   if (h === '#logs') return 'logs';
   if (h === '#users') return 'users';
+  if (h === '#sales') return 'sales';
   return '';
 }
 
@@ -601,6 +679,10 @@ function formSnapPayload() {
     notes: d.notes || '',
     systemFlow: d.systemFlow || '',
     hardwareOther: d.hardwareOther || '',
+    yearlyCloudPos: String(d.yearlyCloudPos == null ? '' : d.yearlyCloudPos),
+    yearlyCloudCrm: String(d.yearlyCloudCrm == null ? '' : d.yearlyCloudCrm),
+    yearlyCloudHq: String(d.yearlyCloudHq == null ? '' : d.yearlyCloudHq),
+    yearlyCloudMonth: String(d.yearlyCloudMonth == null ? '' : d.yearlyCloudMonth),
     hardware: aggregateHardwareFromBranches(d.branches || []).map(h => ({
       hardwareId: Number(h.hardwareId),
       qty: Number(h.qty || 0),
@@ -803,8 +885,9 @@ function shell(content, opts) {
         <button type="button" class="side-link ${active === 'overview' ? 'on' : ''}" data-go="#overview"><span class="ni">01</span>ภาพรวม Brand</button>
         <button type="button" class="side-link ${active === 'home' ? 'on' : ''}" data-go="#shops"><span class="ni">02</span>รายการร้าน</button>
         <button type="button" class="side-link ${active === 'new' ? 'on' : ''}" data-go="#new"><span class="ni">03</span>เพิ่มร้าน</button>
-        ${isAdmin ? `<button type="button" class="side-link ${active === 'users' ? 'on' : ''}" data-go="#users"><span class="ni">04</span>ผู้ใช้</button>` : ''}
-        ${isAdmin ? `<button type="button" class="side-link ${active === 'logs' ? 'on' : ''}" data-go="#logs"><span class="ni">05</span>ประวัติ</button>` : ''}
+        ${isAdmin ? `<button type="button" class="side-link ${active === 'sales' ? 'on' : ''}" data-go="#sales"><span class="ni">04</span>ยอดขาย</button>` : ''}
+        ${isAdmin ? `<button type="button" class="side-link ${active === 'users' ? 'on' : ''}" data-go="#users"><span class="ni">05</span>ผู้ใช้</button>` : ''}
+        ${isAdmin ? `<button type="button" class="side-link ${active === 'logs' ? 'on' : ''}" data-go="#logs"><span class="ni">06</span>ประวัติ</button>` : ''}
       </nav>
       <div class="side-foot">
         <div class="who">${esc(state.user.username)}</div>
@@ -1222,6 +1305,18 @@ function compareServerLabels(a, b) {
   return naturalCompare(a, b, 'en');
 }
 
+/**
+ * ชื่อที่ใช้โชว์ในตาราง — เน้น “ชื่อภาษาอังกฤษ” ที่กรอกใน database:
+ * brand_name (อังกฤษ) → company_name_en (อังกฤษ) → brand_name → ชื่อร้าน
+ */
+function shopDisplayName(s) {
+  const b = String(s.brandName || '').trim();
+  const e = String(s.companyNameEn || '').trim();
+  if (/[A-Za-z]/.test(b)) return b;
+  if (/[A-Za-z]/.test(e)) return e;
+  return b || s.name;
+}
+
 function filteredShops() {
   const q = state.q.trim();
   const list = (state.shops || []).filter(s => {
@@ -1233,7 +1328,10 @@ function filteredShops() {
       s.facebookUrl, s.instagramUrl, s.contactLine, s.contactOther,
     ], q);
   });
-  return list.slice().sort((a, b) => naturalCompare(a.name, b.name, 'th'));
+  // เรียงตามชื่อที่ใช้โชว์ (ชื่อภาษาอังกฤษ ถ้ามี)
+  return list.slice().sort((a, b) => naturalCompare(
+    shopDisplayName(a), shopDisplayName(b), 'th'
+  ));
 }
 
 async function loadShops(force) {
@@ -1272,7 +1370,7 @@ function listTableHtml(list, sources) {
 
   const rows = pageItems.map(s => `
     <tr data-id="${s.id}" tabindex="0" class="shop-row">
-      <td data-label="ร้าน"><div class="shop-name">${esc(s.name)}</div></td>
+      <td data-label="Brand Name"><div class="shop-name">${esc(shopDisplayName(s))}</div></td>
       <td data-label="วันเริ่มใช้" class="nowrap">${esc(fmtDate(s.startDate))}</td>
       <td data-label="ประเภท">${esc(s.businessType ? bizLabel(s.businessType) : '—')}</td>
       <td data-label="ระบบที่เปิดใช้">${summaryChips(s.serviceSummary)}</td>
@@ -1282,7 +1380,7 @@ function listTableHtml(list, sources) {
     pages,
     html: `<div class="table-wrap shop-list-wrap">
       <table class="data shop-list">
-        <thead><tr><th>ร้าน</th><th>วันเริ่มใช้</th><th>ประเภท</th><th>ระบบที่เปิดใช้</th></tr></thead>
+        <thead><tr><th>Brand Name</th><th>วันเริ่มใช้</th><th>ประเภท</th><th>ระบบที่เปิดใช้</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`,
@@ -1474,11 +1572,12 @@ async function renderList() {
   const list = filteredShops();
   const painted = listTableHtml(list, sources);
 
-  let overview = { totalBrands: 0, totalBranches: 0, totalBusinessTypes: 0 };
+  let overview = { totalBrands: 0, totalBranches: 0, totalBusinessTypes: 0, totalShops: 0 };
   try {
     overview = await api('/api/overview/brands');
   } catch (e) { /* keep zeros */ }
   const fmtN = (n) => Number(n || 0).toLocaleString('th-TH');
+  const shopN = Number(overview.totalShops || (state.shops || []).length);
 
   shell(`
     <section class="shops-board">
@@ -1501,16 +1600,19 @@ async function renderList() {
 
       <div class="ov-kpis list-ov-kpis sh-kpis">
         <div class="ov-kpi" style="--i:0">
-          <div class="ov-kpi-label">TOTAL BRANDS</div>
-          <div class="ov-kpi-value">${fmtN(overview.totalBrands)}</div>
+          <div class="ov-kpi-label">ร้านทั้งหมด</div>
+          <div class="ov-kpi-value">${fmtN(shopN)}</div>
+          <div class="ov-kpi-hint">1 โปรไฟล์ = 1 ร้าน</div>
         </div>
         <div class="ov-kpi" style="--i:1">
-          <div class="ov-kpi-label">TOTAL BRANCH</div>
+          <div class="ov-kpi-label">สาขาทั้งหมด</div>
           <div class="ov-kpi-value">${fmtN(overview.totalBranches)}</div>
+          <div class="ov-kpi-hint">รวมสาขาในทุกร้าน</div>
         </div>
         <div class="ov-kpi" style="--i:2">
-          <div class="ov-kpi-label">TOTAL BUSINESS TYPE</div>
-          <div class="ov-kpi-value">${fmtN(overview.totalBusinessTypes)}</div>
+          <div class="ov-kpi-label">แบรนด์</div>
+          <div class="ov-kpi-value">${fmtN(overview.totalBrands)}</div>
+          <div class="ov-kpi-hint">Brand ซ้ำกันนับเป็น 1</div>
         </div>
       </div>
 
@@ -2096,8 +2198,13 @@ function updateBranchMatchHint() {
   const declared = countEl && countEl.value !== '' ? Number(countEl.value) : null;
   const named = collectBranchesFromForm().length;
   if (declared == null || !Number.isFinite(declared)) {
-    hint.textContent = named ? `มีชื่อสาขา ${named} รายการ` : '';
+    hint.textContent = 'กรอกจำนวนสาขา แล้วใส่ชื่อสาขาให้ครบตามจำนวน';
     hint.className = 'field-hint branch-match-hint';
+    return;
+  }
+  if (declared < 1) {
+    hint.textContent = 'จำนวนสาขาต้องอย่างน้อย 1';
+    hint.className = 'field-hint branch-match-hint bad';
     return;
   }
   if (named === declared) {
@@ -2111,12 +2218,25 @@ function updateBranchMatchHint() {
 
 function validateBranchCountMatch(branchCount, branches) {
   const named = (branches || []).length;
-  if (branchCount == null || branchCount === '') return null;
+  if (branchCount == null || branchCount === '') return 'กรุณากรอกจำนวนสาขา';
   const n = Number(branchCount);
-  if (!Number.isFinite(n) || n < 0) return 'จำนวนสาขาไม่ถูกต้อง';
+  if (!Number.isFinite(n) || n < 1) return 'จำนวนสาขาต้องอย่างน้อย 1';
   if (named !== n) {
     return `จำนวนสาขาที่กรอกเป็น ${n} ต้องเพิ่มชื่อสาขาให้ครบ ${n} รายการ (ตอนนี้มี ${named})`;
   }
+  return null;
+}
+
+function shopRequiredError(payload) {
+  if (!payload.name) return { id: 'fName', message: 'กรุณากรอกชื่อร้าน' };
+  if (!payload.brandName) return { id: 'fBrand', message: 'กรุณากรอก Brand Name' };
+  if (!payload.businessType) return { id: 'fType', message: 'กรุณาเลือกประเภทธุรกิจ' };
+  if (payload.businessType === 'Other' && !payload.businessTypeOther) {
+    return { id: 'fTypeOther', message: 'กรุณาระบุประเภทธุรกิจอื่น ๆ' };
+  }
+  if (!payload.startDate) return { id: 'fStart', message: 'กรุณากรอกวันเริ่มใช้ระบบ' };
+  const branchErr = validateBranchCountMatch(payload.branchCount, payload.branches);
+  if (branchErr) return { id: 'fBranchCount', message: branchErr };
   return null;
 }
 
@@ -2132,6 +2252,7 @@ function emptyDraft(services, hardware) {
     contactName: '', contactNickname: '', contactPhone: '', contactEmail: '',
     contactLine: '', contactOther: '',
     dataSource: '', restDb: '', restId: '', notes: '', systemFlow: '', hardwareOther: '',
+    yearlyCloudPos: '', yearlyCloudCrm: '', yearlyCloudHq: '', yearlyCloudMonth: '',
     hardware: hw.map(h => ({
       hardwareId: h.id, code: h.code, name: h.name, qty: 0,
     })),
@@ -2178,6 +2299,10 @@ function draftFromShop(shop) {
     notes: shop.notes || '',
     systemFlow: shop.systemFlow || '',
     hardwareOther: shop.hardwareOther || '',
+    yearlyCloudPos: shop.yearlyCloudPos == null ? '' : shop.yearlyCloudPos,
+    yearlyCloudCrm: shop.yearlyCloudCrm == null ? '' : shop.yearlyCloudCrm,
+    yearlyCloudHq: shop.yearlyCloudHq == null ? '' : shop.yearlyCloudHq,
+    yearlyCloudMonth: shop.yearlyCloudMonth == null ? '' : shop.yearlyCloudMonth,
     hardware: aggregateHardwareFromBranches(branches),
     images: shop.images || [],
     pendingImages: [],
@@ -2397,9 +2522,9 @@ async function renderForm(editing, opts) {
         <div class="form-hero-copy">
           <p class="form-kicker">THANVASU · Customer Profile</p>
           <h1 class="form-title">${editing ? 'แก้ไขโปรไฟล์ลูกค้า' : 'เพิ่มโปรไฟล์ลูกค้า'}</h1>
-          <p class="form-sub">กรอกทีละส่วน — กดแถบด้านบนเพื่อกระโดดไปยังข้อมูลลูกค้า · ระบบ · Hardware · รูปภาพ</p>
+          <p class="form-sub">กรอกทีละส่วน — กดแถบด้านบนเพื่อกระโดดไปยังข้อมูลลูกค้า · ระบบ · Hardware · Yearly Cloud / MA · รูปภาพ</p>
           <div class="form-meta-row">
-            <span class="form-meta-chip"><strong>4</strong> ส่วน</span>
+            <span class="form-meta-chip"><strong>5</strong> ส่วน</span>
             <span class="form-meta-chip soft">${editing ? 'โหมดแก้ไข' : 'สร้างใหม่'}</span>
             <span class="form-meta-chip soft">ช่อง * จำเป็น</span>
           </div>
@@ -2435,6 +2560,13 @@ async function renderForm(editing, opts) {
         <a class="form-step" href="#form-sec-4" data-sec="form-sec-4">
           <span class="form-step-num">04</span>
           <span class="form-step-body">
+            <span class="form-step-label">Yearly Cloud / MA</span>
+            <span class="form-step-hint">POS · CRM · HQ</span>
+          </span>
+        </a>
+        <a class="form-step" href="#form-sec-5" data-sec="form-sec-5">
+          <span class="form-step-num">05</span>
+          <span class="form-step-body">
             <span class="form-step-label">รูปภาพ</span>
             <span class="form-step-hint">โลโก้ · หน้าร้าน</span>
           </span>
@@ -2458,7 +2590,7 @@ async function renderForm(editing, opts) {
               <input id="fName" value="${esc(d.name)}" autocomplete="organization">
             </div>
             <div>
-              <label for="fBrand">Brand Name (ภาษาอังกฤษ)</label>
+              <label for="fBrand">Brand Name (ภาษาอังกฤษ) *</label>
               <input id="fBrand" value="${esc(d.brandName)}" placeholder="Brand Name">
             </div>
             <div>
@@ -2470,14 +2602,14 @@ async function renderForm(editing, opts) {
               <input id="fCoEn" value="${esc(d.companyNameEn)}">
             </div>
             <div class="full">
-              <label for="fType">ประเภทธุรกิจ</label>
+              <label for="fType">ประเภทธุรกิจ *</label>
               <select id="fType">
                 <option value="">— เลือก —</option>
                 ${types.map(t => `<option value="${esc(t.en)}" ${d.businessType === t.en ? 'selected' : ''}>${esc(t.en)} — ${esc(t.th)}</option>`).join('')}
               </select>
             </div>
             <div class="full" id="otherWrap" style="display:${d.businessType === 'Other' ? 'block' : 'none'}">
-              <label for="fTypeOther">ระบุประเภทอื่น ๆ</label>
+              <label for="fTypeOther">ระบุประเภทอื่น ๆ *</label>
               <input id="fTypeOther" value="${esc(d.businessTypeOther)}">
             </div>
             <div class="full date-field">
@@ -2491,8 +2623,8 @@ async function renderForm(editing, opts) {
           <div class="form-section-head">
             <div class="form-section-title"><span class="form-section-mark" aria-hidden="true"></span>สาขา</div>
             <div class="branch-count-inline">
-              <label for="fBranchCount">จำนวนสาขา</label>
-              <input id="fBranchCount" type="number" min="0" max="9999" value="${esc(d.branchCount === '' || d.branchCount == null ? '' : d.branchCount)}">
+              <label for="fBranchCount">จำนวนสาขา *</label>
+              <input id="fBranchCount" type="number" min="1" max="9999" value="${esc(d.branchCount === '' || d.branchCount == null ? '' : d.branchCount)}">
             </div>
           </div>
           <div class="form-subgrid">
@@ -2612,6 +2744,58 @@ async function renderForm(editing, opts) {
       <div class="form-panel-head">
         <span class="form-panel-num" aria-hidden="true">04</span>
         <div class="form-panel-copy">
+          <h2 class="form-step-title">Yearly Cloud / MA</h2>
+          <p class="form-panel-sub">เลือกเดือนที่ต้องเก็บค่า แล้วกรอกจำนวนเงินเป็นบาท (THB) ต่อปี</p>
+        </div>
+      </div>
+      <div class="form-grid">
+        <div class="form-section full">
+          <div class="form-subgrid">
+            <div>
+              <label for="fMaPos">Yearly Cloud / MA (POS)</label>
+              <div class="money-input">
+                <input id="fMaPos" class="ma-amount" type="text" inputmode="decimal" autocomplete="off"
+                  placeholder="X,XXX THB." value="${esc(formatMoneyInput(d.yearlyCloudPos))}">
+                <span class="money-suffix">THB</span>
+              </div>
+              <p class="field-hint ma-preview" data-preview="fMaPos">X,XXX THB.</p>
+            </div>
+            <div>
+              <label for="fMaCrm">Yearly Cloud / MA (CRM)</label>
+              <div class="money-input">
+                <input id="fMaCrm" class="ma-amount" type="text" inputmode="decimal" autocomplete="off"
+                  placeholder="X,XXX THB." value="${esc(formatMoneyInput(d.yearlyCloudCrm))}">
+                <span class="money-suffix">THB</span>
+              </div>
+              <p class="field-hint ma-preview" data-preview="fMaCrm">X,XXX THB.</p>
+            </div>
+            <div>
+              <label for="fMaHq">Yearly Cloud / MA (HQ)</label>
+              <div class="money-input">
+                <input id="fMaHq" class="ma-amount" type="text" inputmode="decimal" autocomplete="off"
+                  placeholder="X,XXX THB." value="${esc(formatMoneyInput(d.yearlyCloudHq))}">
+                <span class="money-suffix">THB</span>
+              </div>
+              <p class="field-hint ma-preview" data-preview="fMaHq">X,XXX THB.</p>
+            </div>
+            <div>
+              <label for="fMaMonth">เดือนที่ต้องเก็บ</label>
+              <select id="fMaMonth">
+                <option value="">— เลือกเดือน —</option>
+                ${TH_MONTHS_FULL.map((t, i) => `<option value="${i + 1}" ${Number(d.yearlyCloudMonth) === i + 1 ? 'selected' : ''}>${esc(t)}</option>`).join('')}
+              </select>
+              <p class="field-hint">ไปโชว์ในหน้ายอดขาย</p>
+            </div>
+          </div>
+          <p class="field-hint">พิมพ์ตัวเลขได้เลย เช่น 15000 จะขึ้นเป็น 15,000 THB. — เว้นว่างได้ถ้ายังไม่มีค่า</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="surface panel glow-edge form-panel" id="form-sec-5">
+      <div class="form-panel-head">
+        <span class="form-panel-num" aria-hidden="true">05</span>
+        <div class="form-panel-copy">
           <h2 class="form-step-title">รูปภาพ</h2>
           <p class="form-panel-sub">โลโก้สูงสุด 2 รูป · หน้าร้านสูงสุด 5 รูป</p>
         </div>
@@ -2640,6 +2824,7 @@ async function renderForm(editing, opts) {
   bindStatusSeg();
   bindBranchEditor();
   bindDateEasy();
+  bindMoneyAmounts();
   $$('.form-step').forEach(a => {
     a.onclick = e => {
       e.preventDefault();
@@ -2649,7 +2834,7 @@ async function renderForm(editing, opts) {
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     };
   });
-  const stepSecs = ['form-sec-1', 'form-sec-2', 'form-sec-3', 'form-sec-4']
+  const stepSecs = ['form-sec-1', 'form-sec-2', 'form-sec-3', 'form-sec-4', 'form-sec-5']
     .map(id => document.getElementById(id))
     .filter(Boolean);
   if (stepSecs.length && 'IntersectionObserver' in window) {
@@ -2729,32 +2914,35 @@ async function renderForm(editing, opts) {
       contactEmail: $('#fContactEmail').value.trim(),
       contactLine: ($('#fContactLine') || {}).value ? $('#fContactLine').value.trim() : '',
       contactOther: ($('#fContactOther') || {}).value ? $('#fContactOther').value.trim() : '',
-      dataSource: '',
+      dataSource: (editing && state.current && state.current.dataSource) || '',
       notes: $('#fNotes').value.trim(),
       systemFlow: $('#fFlow').value.trim(),
       hardwareOther: $('#fHwOther').value.trim(),
+      yearlyCloudPos: readMaAmount('fMaPos'),
+      yearlyCloudCrm: readMaAmount('fMaCrm'),
+      yearlyCloudHq: readMaAmount('fMaHq'),
+      yearlyCloudMonth: ($('#fMaMonth') || {}).value || '',
       hardware: collectHardwareFromForm(),
       services: collectServicesFromForm(),
     };
-    if (!payload.name) {
-      toast('กรุณากรอกชื่อร้าน', true);
-      $('#fName').focus();
-      return;
-    }
-    if (!payload.startDate) {
-      toast('กรุณากรอกวันเริ่มใช้ระบบ', true);
-      const dateTyped = document.querySelector('.date-easy[data-date-id="fStart"] .date-typed');
-      if (dateTyped) dateTyped.focus();
-      else if ($('#fStart')) $('#fStart').focus();
-      return;
-    }
-    const branchErr = validateBranchCountMatch(payload.branchCount, payload.branches);
-    if (branchErr) {
-      toast(branchErr, true);
-      updateBranchMatchHint();
-      const firstEmpty = $$('#branchList .br-name').find(inp => !String(inp.value || '').trim());
-      if (firstEmpty) firstEmpty.focus();
-      else if ($('#fBranchCount')) $('#fBranchCount').focus();
+    const need = shopRequiredError(payload);
+    if (need) {
+      toast(need.message, true);
+      if (need.id === 'fBranchCount') {
+        updateBranchMatchHint();
+        const firstEmpty = $$('#branchList .br-name').find(inp => !String(inp.value || '').trim());
+        if (firstEmpty && payload.branchCount) firstEmpty.focus();
+        else if ($('#fBranchCount')) $('#fBranchCount').focus();
+        return;
+      }
+      if (need.id === 'fStart') {
+        const dateTyped = document.querySelector('.date-easy[data-date-id="fStart"] .date-typed');
+        if (dateTyped) dateTyped.focus();
+        else if ($('#fStart')) $('#fStart').focus();
+        return;
+      }
+      const el = need.id ? $('#' + need.id) : null;
+      if (el) el.focus();
       return;
     }
     const btn = $('#btnSave');
@@ -2802,10 +2990,10 @@ async function renderDetail() {
     <div class="surface detail-hero glow-edge">
       <div>
         <div class="page-kicker">โปรไฟล์ลูกค้า</div>
-        <h1>${esc(s.name)}</h1>
-        ${s.brandName ? `<div class="detail-sub">${esc(s.brandName)}</div>` : ''}
+        <h1>${esc(shopDisplayName(s))}</h1>
+        ${shopDisplayName(s) !== s.name ? `<div class="detail-sub">${esc(s.name)}</div>` : ''}
         <div class="gold-rule"></div>
-        <div class="path">${esc(s.brandName || s.companyNameTh || 'โปรไฟล์ลูกค้า')}</div>
+        <div class="path">${esc(shopDisplayName(s) || s.companyNameTh || 'โปรไฟล์ลูกค้า')}</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:14px;position:relative;z-index:1">
         ${summaryChips(s.serviceSummary)}
@@ -2875,7 +3063,17 @@ async function renderDetail() {
     </div>
 
     <div class="surface panel glow-edge">
-      <h2 class="form-step-title"><span class="form-step-mark" aria-hidden="true"></span>4. รูปภาพ</h2>
+      <h2 class="form-step-title"><span class="form-step-mark" aria-hidden="true"></span>4. Yearly Cloud / MA</h2>
+      <div class="grid-facts">
+        <div class="fact"><label>เดือนที่ต้องเก็บ</label><div class="value">${esc(maMonthLabel(s.yearlyCloudMonth))}</div></div>
+        <div class="fact"><label>Yearly Cloud / MA (POS)</label><div class="value">${esc(formatThbDisplay(s.yearlyCloudPos))}</div></div>
+        <div class="fact"><label>Yearly Cloud / MA (CRM)</label><div class="value">${esc(formatThbDisplay(s.yearlyCloudCrm))}</div></div>
+        <div class="fact"><label>Yearly Cloud / MA (HQ)</label><div class="value">${esc(formatThbDisplay(s.yearlyCloudHq))}</div></div>
+      </div>
+    </div>
+
+    <div class="surface panel glow-edge">
+      <h2 class="form-step-title"><span class="form-step-mark" aria-hidden="true"></span>5. รูปภาพ</h2>
       <div class="img-section img-section-view">
         <div class="img-block">
           <h3>โลโก้</h3>
@@ -3429,6 +3627,248 @@ async function renderLogs() {
   }
 }
 
+/** รูปแบบตัวเลขเงิน 12,000 / 12,500.5 */
+function fmtMoney(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return '0';
+  return v.toLocaleString('en-US', { maximumFractionDigits: 2 });
+}
+
+async function downloadSalesExcel() {
+  setBusy(true, 'กำลังสร้างไฟล์ Excel…');
+  try {
+    const r = await fetch('/api/sales/export.xlsx?t=' + Date.now(), {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers: { Accept: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+    });
+    if (r.status === 401) {
+      state.user = null;
+      renderLogin('เซสชันหมดอายุ กรุณาเข้าสู่ระบบใหม่');
+      throw new Error('กรุณาเข้าสู่ระบบ');
+    }
+    if (!r.ok) {
+      const data = await r.json().catch(() => ({}));
+      throw new Error(data.error || ('ดาวน์โหลดไม่สำเร็จ (HTTP ' + r.status + ')'));
+    }
+    const ab = await r.arrayBuffer();
+    if (!ab || ab.byteLength < 64) throw new Error('ไฟล์ว่างหรือสร้างไม่สำเร็จ');
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    const filename = 'CS-Sales-Report-' + stamp + '.xlsx';
+    const blob = new Blob([ab], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2500);
+    toast('ดาวน์โหลด ' + filename + ' แล้ว');
+  } finally {
+    setBusy(false);
+  }
+}
+
+/** หน้า “ยอดขาย” — เฉพาะ Admin / SuperAdmin */
+async function renderSales() {
+  setBusy(true, 'กำลังโหลดยอดขาย…');
+  let data;
+  try {
+    data = await api('/api/sales');
+  } finally {
+    setBusy(false);
+  }
+
+  const kpi = Object.assign(
+    { total: 0, pos: 0, crm: 0, hq: 0, shopCount: 0, withDataCount: 0, monthCount: 0, monthLabels: [] },
+    data.kpi || {}
+  );
+  const months = data.months || [];
+  const missing = data.missing || { rows: [], count: 0 };
+  const monthsWithMa = months.filter(m => Number(m.total) > 0);
+  kpi.monthCount = monthsWithMa.length;
+  kpi.monthLabels = monthsWithMa.map(m => m.label);
+  const fmtN = n => Number(n || 0).toLocaleString('th-TH');
+  const money = n => fmtMoney(n);
+  const cell = n => (Number(n) ? money(n) : '<span class="muted">—</span>');
+  const monthName = m => m.full || TH_MONTHS_FULL[(Number(m.month) || 0) - 1] || m.label || 'ไม่ระบุ';
+
+  const rowOf = (monthLabel, r) => `
+    <tr>
+      <td class="nowrap">${esc(monthLabel)}</td>
+      <td>${esc(r.brand || r.shopName || '—')}</td>
+      <td class="num">${cell(r.total)}</td>
+      <td class="num">${cell(r.pos)}</td>
+      <td class="num">${cell(r.crm)}</td>
+      <td class="num">${cell(r.hq)}</td>
+    </tr>`;
+
+  const groupOf = m => (m.rows && m.rows.length)
+    ? m.rows.map(r => rowOf(monthName(m), r)).join('')
+    : '';
+
+  const sumRows = list => list.reduce((a, r) => ({
+    total: Math.round((a.total + (Number(r.total) || 0)) * 100) / 100,
+    pos: Math.round((a.pos + (Number(r.pos) || 0)) * 100) / 100,
+    crm: Math.round((a.crm + (Number(r.crm) || 0)) * 100) / 100,
+    hq: Math.round((a.hq + (Number(r.hq) || 0)) * 100) / 100,
+  }), { total: 0, pos: 0, crm: 0, hq: 0 });
+
+  const maCount = m => (m.rows || []).filter(r => Number(r.total) > 0).length;
+  const billedMonths = months.filter(m => (m.rows || []).length);
+  const monthFilterHtml = ['<option value="all">ทั้งหมด</option>']
+    .concat(billedMonths.map(m => {
+      const n = maCount(m);
+      const extra = n ? ` (${fmtN(n)} ร้านมียอด)` : ` (${fmtN((m.rows || []).length)} ร้าน)`;
+      return `<option value="${m.month}">${esc(monthName(m))}${extra}</option>`;
+    }))
+    .concat(missing.count
+      ? [`<option value="0">ยังไม่เลือกเดือน (${fmtN(missing.count)} ร้าน)</option>`]
+      : [])
+    .join('');
+  const monthHint = billedMonths.filter(m => Number(m.total) > 0).map(monthName).join(' · ')
+    || 'ยังไม่มีเดือนที่มียอด MA';
+
+  shell(`
+    <section class="shops-board sales-page">
+      <div class="sh-hero">
+        <div class="sh-hero-copy">
+          <p class="sh-kicker">THANVASU · Customer Profile</p>
+          <h1 class="sh-title">ยอดขาย</h1>
+          <p class="sh-sub">ยอด Yearly Cloud / MA รายปี แยกตามเดือนที่ต้องเก็บของแต่ละร้าน — เฉพาะผู้ดูแลระบบและ Super Admin</p>
+          <div class="sh-meta-row">
+            <span class="sh-meta-chip"><strong>${fmtN(kpi.shopCount)}</strong> ร้านทั้งหมด</span>
+            <span class="sh-meta-chip"><strong>${fmtN(kpi.withDataCount)}</strong> ร้านที่มียอด</span>
+            <span class="sh-meta-chip soft">หน่วยบาท (THB)</span>
+          </div>
+        </div>
+        <div class="sh-hero-actions page-actions">
+          <button type="button" class="btn secondary sm" id="btnSalesXlsx">ส่งออก Excel</button>
+        </div>
+      </div>
+
+      <div class="ov-kpis list-ov-kpis sh-kpis">
+        <div class="ov-kpi" style="--i:0">
+          <div class="ov-kpi-label">รวมยอด MA ต่อปี</div>
+          <div class="ov-kpi-value">${money(kpi.total)}</div>
+          <div class="ov-kpi-hint">POS + CRM + HQ</div>
+        </div>
+        <div class="ov-kpi" style="--i:1">
+          <div class="ov-kpi-label">ร้านที่มียอด</div>
+          <div class="ov-kpi-value">${fmtN(kpi.withDataCount)}</div>
+          <div class="ov-kpi-hint">กรอก Yearly Cloud / MA แล้ว</div>
+        </div>
+        <div class="ov-kpi" style="--i:2">
+          <div class="ov-kpi-label">เดือนที่มียอด</div>
+          <div class="ov-kpi-value">${fmtN(kpi.monthCount)}</div>
+          <div class="ov-kpi-hint">${esc(monthHint)}</div>
+        </div>
+      </div>
+
+      <div class="surface control-bar glow-edge sh-controls">
+        <div class="field">
+          <label for="salesMonthFilter">เดือนที่ต้องเก็บ</label>
+          <select id="salesMonthFilter" aria-label="กรองตามเดือนที่ต้องเก็บ Yearly Cloud / MA">${monthFilterHtml}</select>
+        </div>
+        <div class="field">
+          <label for="salesSearch">ค้นหา</label>
+          <input id="salesSearch" type="search" placeholder="ชื่อแบรนด์ / ร้าน" autocomplete="off" aria-label="ค้นหาแบรนด์หรือร้าน">
+        </div>
+      </div>
+
+      <div class="list-hint sh-hint" id="salesHint">เดือนนับจาก “เดือนที่ต้องเก็บ Yearly Cloud / MA” ของแต่ละร้าน · แสดงยอดเป็นบาท</div>
+
+      <div class="surface table-shell glow-edge sh-table">
+        <div class="table-wrap sales-table-wrap">
+          <table class="data">
+            <thead>
+              <tr>
+                <th>เดือน</th>
+                <th>แบรนด์ / ร้าน</th>
+                <th class="num">รวม (Total)</th>
+                <th class="num">Yearly POS</th>
+                <th class="num">Yearly CRM</th>
+                <th class="num">Yearly HQ</th>
+              </tr>
+            </thead>
+            <tbody id="salesTbody"></tbody>
+            <tfoot id="salesTfoot"></tfoot>
+          </table>
+        </div>
+      </div>
+    </section>
+  `, { title: 'ยอดขาย' });
+
+  // ระบายตารางตามตัวกรองเดือน + ช่องค้นหา (KPI ด้านบนยังเป็นยอดรวมทุกเดือนตามเดิม)
+  const paintSalesTable = () => {
+    const sel = ($('#salesMonthFilter') || {}).value || 'all';
+    const rawQ = String((($('#salesSearch') || {}).value || '')).trim();
+    const q = rawQ.toLowerCase();
+    const picked = sel === '0' ? []
+      : sel === 'all' ? billedMonths.slice()
+      : billedMonths.filter(m => String(m.month) === sel);
+    const selMonth = picked[0] || {};
+    const showMissing = (sel === 'all' || sel === '0') && (missing.count || 0) > 0;
+
+    const all = [];
+    picked.forEach(m => (m.rows || []).forEach(r => all.push({ label: monthName(m), r })));
+    if (showMissing) (missing.rows || []).forEach(r => all.push({ label: 'ยังไม่เลือกเดือน', r }));
+    const hit = q
+      ? all.filter(x => String(x.r.brand || x.r.shopName || '').toLowerCase().indexOf(q) >= 0)
+      : all;
+    const tot = sumRows(hit.map(x => x.r));
+
+    const body = [];
+    if (q) {
+      if (hit.length) hit.forEach(x => body.push(rowOf(x.label, x.r)));
+      else body.push('<tr class="sales-none"><td colspan="6">— ไม่พบข้อมูลที่ค้นหา —</td></tr>');
+    } else {
+      picked.forEach(m => { const g = groupOf(m); if (g) body.push(g); });
+      if (showMissing) (missing.rows || []).forEach(r => body.push(rowOf('ยังไม่เลือกเดือน', r)));
+      if (!body.length) body.push('<tr class="sales-none"><td colspan="6">— ยังไม่มีร้านที่เลือกเดือนที่ต้องเก็บ —</td></tr>');
+    }
+    $('#salesTbody').innerHTML = body.join('');
+
+    const footLabel = q ? 'รวมที่ค้นหา'
+      : sel === '0' ? 'รวมร้านที่ยังไม่เลือกเดือน'
+      : (sel === 'all' ? 'รวมทั้งหมด' : 'รวมเดือน ' + monthName(selMonth));
+    $('#salesTfoot').innerHTML = `
+      <tr class="sales-total">
+        <th colspan="2">${footLabel}</th>
+        <th class="num">${money(tot.total)}</th>
+        <th class="num">${money(tot.pos)}</th>
+        <th class="num">${money(tot.crm)}</th>
+        <th class="num">${money(tot.hq)}</th>
+      </tr>`;
+
+    const hint = $('#salesHint');
+    if (hint) {
+      if (q) {
+        hint.textContent = `ค้นหา “${rawQ}” · ${fmtN(hit.length)} ร้าน`
+          + (sel === 'all' || sel === '0' ? '' : ` ในเดือน${monthName(selMonth)}`) + ' · หน่วยบาท';
+      } else if (sel === '0') {
+        hint.textContent = `ร้านที่ยังไม่ได้เลือกเดือนที่ต้องเก็บ · ${fmtN(missing.count || 0)} ร้าน · หน่วยบาท`;
+      } else if (sel === 'all') {
+        hint.textContent = 'เดือนดึงจากช่อง “เดือนที่ต้องเก็บ” ใน Yearly Cloud / MA · หน่วยบาท';
+      } else {
+        hint.textContent = `แสดงเฉพาะเดือน${monthName(selMonth)} · ${fmtN(selMonth.count || 0)} ร้าน · หน่วยบาท`;
+      }
+    }
+  };
+
+  const selEl = $('#salesMonthFilter');
+  if (selEl) selEl.onchange = paintSalesTable;
+  const searchEl = $('#salesSearch');
+  if (searchEl) {
+    searchEl.oninput = paintSalesTable;
+    searchEl.onsearch = paintSalesTable;
+  }
+  paintSalesTable();
+
+  $('#btnSalesXlsx').onclick = () => downloadSalesExcel().catch(e => toast(e.message, true));
+}
+
 function openChangePasswordModal() {
   let back = $('#chgPwModal');
   if (back) back.remove();
@@ -3490,14 +3930,20 @@ function renderLogin(err) {
   document.title = 'เข้าสู่ระบบ — CS System';
   closeSide();
   const year = new Date().getFullYear();
+  const titleHtml = [...'CS System'].map((ch, i) =>
+    `<span style="--i:${i}">${ch === ' ' ? '&nbsp;' : esc(ch)}</span>`
+  ).join('');
   app.innerHTML = `
   <div class="login-wrap" id="loginStage">
     <div class="login-bg" aria-hidden="true">
+      <div class="login-rays"></div>
+      <div class="login-mesh"></div>
       <div class="login-aurora a1"></div>
       <div class="login-aurora a2"></div>
       <div class="login-aurora a3"></div>
       <div class="login-grain"></div>
       <div class="login-grid-fx"></div>
+      <div class="login-ring-fx" data-parallax="-0.012"></div>
       <div class="login-orb o1" data-parallax="0.028"></div>
       <div class="login-orb o2" data-parallax="-0.035"></div>
       <div class="login-orb o3" data-parallax="0.022"></div>
@@ -3507,27 +3953,53 @@ function renderLogin(err) {
       <span class="login-spark s3"></span>
       <span class="login-spark s4"></span>
       <span class="login-spark s5"></span>
+      <div class="login-dust">
+        <span class="d1"></span><span class="d2"></span><span class="d3"></span>
+        <span class="d4"></span><span class="d5"></span><span class="d6"></span>
+        <span class="d7"></span><span class="d8"></span><span class="d9"></span>
+        <span class="d10"></span><span class="d11"></span><span class="d12"></span>
+      </div>
+      <canvas class="login-canvas" id="loginCanvas"></canvas>
       <div class="login-spotlight" id="loginSpot"></div>
     </div>
     <div class="login-frame" id="loginFrame">
       <div class="login-stage">
         <aside class="login-hero">
+          <div class="login-hero-grid" aria-hidden="true"></div>
+          <div class="login-scan" aria-hidden="true"></div>
           <div class="login-hero-sheen" aria-hidden="true"></div>
           <div class="login-mark" aria-hidden="true">CS</div>
+          <div class="login-floaters" aria-hidden="true">
+            <span class="login-floater f1" data-parallax="0.04">POS</span>
+            <span class="login-floater f2" data-parallax="-0.03">CRM</span>
+            <span class="login-floater f3" data-parallax="0.05">HQ</span>
+            <span class="login-floater f4" data-parallax="-0.04">MA</span>
+          </div>
           <div class="login-hero-top">
-            <div class="login-logo-ring">
+            <div class="login-logo-ring" id="loginLogo">
               <span class="login-orbit" aria-hidden="true"></span>
+              <span class="login-sats" aria-hidden="true">
+                <i class="login-sat s-a"></i>
+                <i class="login-sat s-b"></i>
+                <i class="login-sat s-c"></i>
+              </span>
               <img class="brand-logo login" src="/assets/thanvasu-logo.png" alt="THANVASU">
             </div>
           </div>
           <div class="login-hero-copy">
             <p class="login-kicker"><span>THANVASU</span><span class="login-dot">·</span><span>BCS</span></p>
-            <h1><span class="login-title-line">CS System</span></h1>
+            <h1 class="login-title-split">${titleHtml}</h1>
             <div class="login-gold-line" aria-hidden="true"></div>
             <p class="login-tag">คอนโซลโปรไฟล์ลูกค้าภายใน — ดูร้าน ระบบที่ใช้งาน และสถานะซัพพอร์ตได้ในที่เดียว</p>
           </div>
           <div class="login-hero-meta">
             <span class="login-badge"><i aria-hidden="true"></i> Internal use only</span>
+            <div class="login-marquee" aria-hidden="true">
+              <div class="login-marquee-track">
+                <span>Customer Profile</span><span>Hardware</span><span>Yearly Cloud / MA</span><span>Support desk</span>
+                <span>Customer Profile</span><span>Hardware</span><span>Yearly Cloud / MA</span><span>Support desk</span>
+              </div>
+            </div>
           </div>
         </aside>
         <div class="login-panel">
@@ -3618,6 +4090,8 @@ function bindLoginFx() {
   const frame = $('#loginFrame');
   const spot = $('#loginSpot');
   const card = document.querySelector('.login-card');
+  const logo = $('#loginLogo');
+  const mouse = { x: 0.5, y: 0.4 };
 
   $$('.login-input-shell input').forEach(inp => {
     const shell = inp.closest('.login-input-shell');
@@ -3630,12 +4104,27 @@ function bindLoginFx() {
 
   if (reduce) return;
 
+  let lastTrail = 0;
+  const spawnTrail = (clientX, clientY) => {
+    const now = performance.now();
+    if (now - lastTrail < 32) return;
+    lastTrail = now;
+    const d = document.createElement('i');
+    d.className = 'login-trail';
+    d.style.left = clientX + 'px';
+    d.style.top = clientY + 'px';
+    document.body.appendChild(d);
+    setTimeout(() => d.remove(), 680);
+  };
+
   stage.onpointermove = (e) => {
     const r = stage.getBoundingClientRect();
     const nx = (e.clientX - r.left) / r.width;
     const ny = (e.clientY - r.top) / r.height;
     const x = nx - 0.5;
     const y = ny - 0.5;
+    mouse.x = nx;
+    mouse.y = ny;
     stage.style.setProperty('--lx', (nx * 100) + '%');
     stage.style.setProperty('--ly', (ny * 100) + '%');
     if (spot) {
@@ -3648,20 +4137,38 @@ function bindLoginFx() {
       el.style.setProperty('--ty', (y * f * 280) + 'px');
     });
     if (frame) {
-      frame.style.setProperty('--rx', (-y * 4.5) + 'deg');
-      frame.style.setProperty('--ry', (x * 6) + 'deg');
+      frame.style.setProperty('--rx', (-y * 7) + 'deg');
+      frame.style.setProperty('--ry', (x * 9) + 'deg');
     }
     if (card) {
       card.style.setProperty('--gx', (nx * 100) + '%');
       card.style.setProperty('--gy', (ny * 100) + '%');
     }
+    if (logo) {
+      logo.style.setProperty('--mx', (x * 16) + 'px');
+      logo.style.setProperty('--my', (y * 12) + 'px');
+    }
+    spawnTrail(e.clientX, e.clientY);
   };
   stage.onpointerleave = () => {
     if (frame) {
       frame.style.setProperty('--rx', '0deg');
       frame.style.setProperty('--ry', '0deg');
     }
+    if (logo) {
+      logo.style.setProperty('--mx', '0px');
+      logo.style.setProperty('--my', '0px');
+    }
   };
+  stage.addEventListener('pointerdown', (e) => {
+    if (e.target.closest('input, button, a, form')) return;
+    const burst = document.createElement('span');
+    burst.className = 'login-burst';
+    burst.style.left = e.clientX + 'px';
+    burst.style.top = e.clientY + 'px';
+    document.body.appendChild(burst);
+    setTimeout(() => burst.remove(), 720);
+  });
 
   const loginBtn = $('#btnLogin');
   if (loginBtn) {
@@ -3675,6 +4182,85 @@ function bindLoginFx() {
       loginBtn.style.removeProperty('--my');
     };
   }
+
+  const canvas = $('#loginCanvas');
+  if (canvas && canvas.getContext) startLoginCanvas(canvas, stage, mouse);
+}
+
+function startLoginCanvas(canvas, stage, mouse) {
+  const ctx = canvas.getContext('2d');
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const n = window.matchMedia('(max-width: 880px)').matches ? 22 : 56;
+  const palette = [
+    [221, 6, 54],
+    [212, 175, 55],
+    [111, 16, 36],
+    [255, 107, 138],
+  ];
+  const parts = Array.from({ length: n }, (_, i) => ({
+    x: Math.random(),
+    y: Math.random(),
+    vx: (Math.random() - 0.5) * 0.00042,
+    vy: (Math.random() - 0.5) * 0.00042,
+    r: 1.1 + Math.random() * 1.7,
+    c: palette[i % palette.length],
+  }));
+  let w = 0;
+  let h = 0;
+  const resize = () => {
+    if (!canvas.isConnected) return;
+    w = stage.clientWidth;
+    h = stage.clientHeight;
+    canvas.width = Math.max(1, Math.floor(w * dpr));
+    canvas.height = Math.max(1, Math.floor(h * dpr));
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  };
+  const tick = () => {
+    if (!canvas.isConnected) return;
+    ctx.clearRect(0, 0, w, h);
+    for (const p of parts) {
+      p.vx += (mouse.x - p.x) * 0.00045;
+      p.vy += (mouse.y - p.y) * 0.00045;
+      p.vx *= 0.96;
+      p.vy *= 0.96;
+      p.x += p.vx;
+      p.y += p.vy;
+      if (p.x < 0 || p.x > 1) p.vx *= -1;
+      if (p.y < 0 || p.y > 1) p.vy *= -1;
+      p.x = Math.max(0, Math.min(1, p.x));
+      p.y = Math.max(0, Math.min(1, p.y));
+    }
+    const maxD = Math.min(160, Math.max(90, w * 0.12));
+    for (let i = 0; i < parts.length; i++) {
+      for (let j = i + 1; j < parts.length; j++) {
+        const dx = (parts[i].x - parts[j].x) * w;
+        const dy = (parts[i].y - parts[j].y) * h;
+        const dist = Math.hypot(dx, dy);
+        if (dist < maxD) {
+          const a = (1 - dist / maxD) * 0.16;
+          const c = parts[i].c;
+          ctx.strokeStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')';
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(parts[i].x * w, parts[i].y * h);
+          ctx.lineTo(parts[j].x * w, parts[j].y * h);
+          ctx.stroke();
+        }
+      }
+    }
+    for (const p of parts) {
+      ctx.fillStyle = 'rgba(' + p.c[0] + ',' + p.c[1] + ',' + p.c[2] + ',.4)';
+      ctx.beginPath();
+      ctx.arc(p.x * w, p.y * h, p.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    requestAnimationFrame(tick);
+  };
+  resize();
+  window.addEventListener('resize', resize);
+  requestAnimationFrame(tick);
 }
 
 async function route() {
@@ -3724,6 +4310,15 @@ async function route() {
         return;
       }
       await renderLogs();
+      return;
+    }
+    if (h === '#sales') {
+      if (!isAdminUser()) {
+        toast('สำหรับผู้ดูแลระบบและ Super Admin เท่านั้น', true);
+        go('#overview');
+        return;
+      }
+      await renderSales();
       return;
     }
     let m;

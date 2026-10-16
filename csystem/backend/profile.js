@@ -44,7 +44,36 @@ const PROFILE_SHOP_COLUMNS = [
   ['contact_other', 'NVARCHAR(500) NULL'],
   ['system_flow', 'NVARCHAR(MAX) NULL'],
   ['hardware_other', 'NVARCHAR(500) NULL'],
+  ['yearly_cloud_pos', 'DECIMAL(18,2) NULL'],
+  ['yearly_cloud_crm', 'DECIMAL(18,2) NULL'],
+  ['yearly_cloud_hq', 'DECIMAL(18,2) NULL'],
+  ['yearly_cloud_month', 'INT NULL'],
 ];
+
+/** ค่าบริการรายปี (THB) — รับเฉพาะตัวเลข >= 0, ว่าง = null */
+function moneyAmount(v) {
+  if (v === '' || v == null) return null;
+  const n = Number(String(v).replace(/,/g, ''));
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.round(n * 100) / 100;
+}
+
+function moneyOrEmpty(v) {
+  const n = moneyAmount(v);
+  return n == null ? '' : n;
+}
+
+function monthNum(v) {
+  if (v === '' || v == null) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 1 || n > 12) return null;
+  return Math.floor(n);
+}
+
+function monthOrEmpty(v) {
+  const n = monthNum(v);
+  return n == null ? '' : n;
+}
 
 function newBranchId() {
   return crypto.randomBytes(8).toString('hex');
@@ -293,7 +322,9 @@ function profileSelectFragment(alias) {
     ${a}.contact_name, ${a}.contact_nickname, ${a}.contact_phone, ${a}.contact_email,
     ${a}.contact_line, ${a}.contact_other,
     CAST(${a}.system_flow AS nvarchar(max)) AS system_flow,
-    ${a}.hardware_other`;
+    ${a}.hardware_other,
+    ${a}.yearly_cloud_pos, ${a}.yearly_cloud_crm, ${a}.yearly_cloud_hq,
+    ${a}.yearly_cloud_month`;
 }
 
 function mapProfileFields(r) {
@@ -335,6 +366,10 @@ function mapProfileFields(r) {
     contactOther: fix(r.contact_other),
     systemFlow: fix(r.system_flow),
     hardwareOther: fix(r.hardware_other),
+    yearlyCloudPos: moneyOrEmpty(r.yearly_cloud_pos),
+    yearlyCloudCrm: moneyOrEmpty(r.yearly_cloud_crm),
+    yearlyCloudHq: moneyOrEmpty(r.yearly_cloud_hq),
+    yearlyCloudMonth: monthOrEmpty(r.yearly_cloud_month),
   };
 }
 
@@ -364,6 +399,10 @@ function profilePayloadFromData(data) {
     contactOther: String(data.contactOther || '').trim(),
     systemFlow: String(data.systemFlow || '').trim(),
     hardwareOther: String(data.hardwareOther || '').trim(),
+    yearlyCloudPos: moneyAmount(data.yearlyCloudPos),
+    yearlyCloudCrm: moneyAmount(data.yearlyCloudCrm),
+    yearlyCloudHq: moneyAmount(data.yearlyCloudHq),
+    yearlyCloudMonth: monthNum(data.yearlyCloudMonth),
     branches: b.branches,
     hardware: (() => {
       const fromBranches = aggregateHardwareFromBranches(b.branches);
